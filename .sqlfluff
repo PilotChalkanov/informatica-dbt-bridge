@@ -1,0 +1,16 @@
+[sqlfluff]
+dialect = duckdb
+templater = jinja
+
+# Interim only: no dbt_project.yml/profiles.yml exist yet (the CLI that
+# emits models/ hasn't been built), so sqlfluff can't run its real dbt
+# templater against this repo. These stub macros let the plain jinja
+# templater get past {{ source(...) }} / {{ ref(...) }} / {{ config(...) }}
+# without erroring on undefined names, so lint rules can still check basic
+# SQL style. Once a real dbt project scaffold exists, switch
+# templater = dbt here and delete this section - a stub is not a substitute
+# for compiling against the real macros.
+[sqlfluff:templater:jinja:macros]
+source_stub = {% macro source(source_name, table_name) %}{{ source_name }}.{{ table_name }}{% endmacro %}
+ref_stub = {% macro ref(model_name) %}{{ model_name }}{% endmacro %}
+config_stub = {% macro config() %}{% endmacro %}

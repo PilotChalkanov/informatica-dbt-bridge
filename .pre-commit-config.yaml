@@ -1,0 +1,54 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pycqa/bandit
+    rev: 1.9.4
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml", "-r", "-x", "tests", "src"]
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.3.0
+    hooks:
+      - id: mypy
+        files: ^(src|tests)/.*\.py$
+        # pyproject.toml sets [tool.mypy] strict = true. mypy's pre-commit
+        # hook runs in its own isolated env, separate from `uv run mypy`, so
+        # it needs pytest here too - without it, strict mode can't see
+        # pytest.mark.parametrize's real type and flags the decorator as
+        # untyped. No runtime deps to stub (dependencies = [] in
+        # pyproject.toml); if a future translator/CLI adds a real dependency
+        # (e.g. click), add its types-* package here.
+        additional_dependencies: ["pytest>=8.0"]
+
+  # Once the CLI emits real dbt model .sql files, point this at that
+  # directory. Generated models contain dbt Jinja ({{ source(...) }},
+  # {{ ref(...) }}); the default templater can't resolve those without a
+  # real dbt project (dbt_project.yml + profiles.yml) to run against. See
+  # .sqlfluff for the interim jinja-templater config and the TODO on
+  # switching to templater=dbt once that scaffold exists.
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 4.1.0
+    hooks:
+      - id: sqlfluff-lint
+        files: ^models/.*\.sql$
+        args: [--dialect, duckdb]
