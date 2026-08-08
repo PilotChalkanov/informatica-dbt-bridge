@@ -37,6 +37,10 @@ flowchart LR
 4. **Render** the ordered CTEs into a single dbt model SQL file.
 
 Full design rationale, alternatives considered, and non-goals are in [`architecture.md`](architecture.md).
+Internal structure and diagrams: [`docs/architecture/`](docs/architecture/high-level.md).
+
+New to PowerCenter or dbt? Quick guides to each system's own data model and terminology:
+[PowerCenter](docs/primers/informatica-powercenter.md) · [dbt](docs/primers/dbt.md).
 
 ## Status
 
@@ -50,7 +54,7 @@ migration-report generation, a CLI, and an executable dbt/DuckDB integration tes
 
 ```bash
 uv sync
-uv run pytest              # 52 tests
+uv run pytest              # 53 tests
 uv run coverage report -m  # 94% branch coverage
 ```
 
