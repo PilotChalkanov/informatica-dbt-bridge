@@ -6,7 +6,14 @@ real export's schema drifts from the documented shape, the fix belongs here.
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
+# ElementTree is vulnerable to XML attacks (entity expansion, external entity
+# resolution) on untrusted input - see bandit B405/B314. Accepted risk: this
+# tool's input is a PowerCenter Repository Manager/Designer export, treated
+# as a trusted internal artifact within this project's threat model (a
+# colleague's own repo export), not attacker-supplied data. If that
+# assumption ever changes (e.g. this becomes a service accepting uploads
+# from outside the org), switch to defusedxml before then, not after.
+import xml.etree.ElementTree as ET  # nosec B405
 
 from informatica_dbt_bridge.models import (
     Connector,
@@ -26,7 +33,7 @@ class PowerCenterParseError(Exception):
 
 
 def parse_mapping(xml_text: str, mapping_name: str | None = None) -> Mapping:
-    root = ET.fromstring(xml_text)
+    root = ET.fromstring(xml_text)  # nosec B314 - see accepted-risk note on the import above
 
     folder = root.find(".//FOLDER")
     if folder is None:
