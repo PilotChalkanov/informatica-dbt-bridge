@@ -12,8 +12,18 @@ class CycleError(Exception):
 
 
 def topological_order(mapping: Mapping) -> list[str]:
-    """Return transformation instance names ordered so every upstream node precedes
-    the downstream nodes that consume its output."""
+    """Order a mapping's transformations so every upstream node precedes its consumers.
+
+    Args:
+        mapping: The mapping whose transformation graph should be ordered.
+
+    Returns:
+        Transformation instance names in an order where each name appears
+        after every transformation that feeds it via a CONNECTOR edge.
+
+    Raises:
+        CycleError: The mapping's CONNECTOR edges form a cycle.
+    """
     names = {node.name for node in mapping.transformations}
     graph: dict[str, set[str]] = {name: set() for name in names}
     for connector in mapping.connectors:

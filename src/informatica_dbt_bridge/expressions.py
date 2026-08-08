@@ -17,18 +17,39 @@ class _ArgCountError(Exception):
 
 @dataclass(frozen=True)
 class ExpressionResult:
+    """The SQL translation of an expression, plus any functions it couldn't translate."""
+
     sql: str
     unrecognized_functions: list[str] = field(default_factory=list)
 
 
 def translate_expression(expr: str) -> ExpressionResult:
+    """Translate a single Informatica expression-language string into SQL.
+
+    Args:
+        expr: A raw expression-language string, e.g.
+            `"IIF(AMOUNT > 1000, 'Y', 'N')"`.
+
+    Returns:
+        An ExpressionResult with the translated SQL and the name of any
+        function this translator didn't recognize (empty if everything was
+        translated).
+    """
     translator = _Translator()
     sql = translator.translate(expr)
     return ExpressionResult(sql=sql, unrecognized_functions=translator.unrecognized)
 
 
 def _scan_string_literal(s: str, i: int) -> int:
-    """`s[i] == \"'\"`; return the index just past the closing quote (handles '' escapes)."""
+    """Skip past a single-quoted string literal, handling `''`-escaped quotes.
+
+    Args:
+        s: The expression text.
+        i: Index of the opening `'` (i.e. `s[i] == "'"`).
+
+    Returns:
+        The index just past the literal's closing quote.
+    """
     j = i + 1
     n = len(s)
     while j < n:
@@ -42,6 +63,18 @@ def _scan_string_literal(s: str, i: int) -> int:
 
 
 def _find_matching_paren(s: str, open_idx: int) -> int:
+    """Find the `)` that closes the `(` at `open_idx`, skipping string literals.
+
+    Args:
+        s: The expression text.
+        open_idx: Index of the opening `(`.
+
+    Returns:
+        The index of the matching closing `)`.
+
+    Raises:
+        ValueError: `s` has no matching closing paren for `open_idx`.
+    """
     depth = 0
     i = open_idx
     n = len(s)
@@ -61,6 +94,17 @@ def _find_matching_paren(s: str, open_idx: int) -> int:
 
 
 def _split_top_level_args(inner: str) -> list[str]:
+    """Split a function call's argument list on top-level commas.
+
+    Commas inside nested `(...)` or `'...'` don't count as separators.
+
+    Args:
+        inner: The text between a function call's outer parentheses.
+
+    Returns:
+        Each argument's text, stripped of surrounding whitespace. Empty list
+        if `inner` is blank (a zero-argument call).
+    """
     if inner.strip() == "":
         return []
     parts = []
@@ -86,6 +130,17 @@ def _split_top_level_args(inner: str) -> list[str]:
 
 
 def _render_iif(args: list[str]) -> str:
+    """`IIF(cond, a, b)` -> `CASE WHEN cond THEN a ELSE b END`.
+
+    Args:
+        args: The call's already-translated arguments; must have length 3.
+
+    Returns:
+        The equivalent `CASE WHEN` SQL expression.
+
+    Raises:
+        _ArgCountError: `args` doesn't have exactly 3 elements.
+    """
     if len(args) != 3:
         raise _ArgCountError
     cond, when_true, when_false = args
@@ -93,12 +148,34 @@ def _render_iif(args: list[str]) -> str:
 
 
 def _render_nvl(args: list[str]) -> str:
+    """`NVL(val, default)` -> `COALESCE(val, default)`.
+
+    Args:
+        args: The call's already-translated arguments; must have length 2.
+
+    Returns:
+        The equivalent `COALESCE` SQL expression.
+
+    Raises:
+        _ArgCountError: `args` doesn't have exactly 2 elements.
+    """
     if len(args) != 2:
         raise _ArgCountError
     return f"COALESCE({args[0]}, {args[1]})"
 
 
 def _render_nvl2(args: list[str]) -> str:
+    """`NVL2(val, a, b)` -> `CASE WHEN val IS NOT NULL THEN a ELSE b END`.
+
+    Args:
+        args: The call's already-translated arguments; must have length 3.
+
+    Returns:
+        The equivalent `CASE WHEN` SQL expression.
+
+    Raises:
+        _ArgCountError: `args` doesn't have exactly 3 elements.
+    """
     if len(args) != 3:
         raise _ArgCountError
     val, when_not_null, when_null = args
@@ -106,12 +183,36 @@ def _render_nvl2(args: list[str]) -> str:
 
 
 def _render_isnull(args: list[str]) -> str:
+    """`ISNULL(val)` -> `val IS NULL`.
+
+    Args:
+        args: The call's already-translated arguments; must have length 1.
+
+    Returns:
+        The equivalent `IS NULL` SQL expression.
+
+    Raises:
+        _ArgCountError: `args` doesn't have exactly 1 element.
+    """
     if len(args) != 1:
         raise _ArgCountError
     return f"{args[0]} IS NULL"
 
 
 def _render_decode(args: list[str]) -> str:
+    """`DECODE(val, s1, r1, ..., [dflt])` -> `CASE val WHEN s1 THEN r1 ... [ELSE dflt] END`.
+
+    Args:
+        args: The call's already-translated arguments; must have at least 3
+            elements (`val` plus at least one `search, result` pair), with an
+            odd remainder after `val` meaning the last argument is a default.
+
+    Returns:
+        The equivalent `CASE` SQL expression.
+
+    Raises:
+        _ArgCountError: `args` has fewer than 3 elements.
+    """
     if len(args) < 3:
         raise _ArgCountError
     value, *rest = args
@@ -126,6 +227,17 @@ def _render_decode(args: list[str]) -> str:
 
 
 def _render_substr(args: list[str]) -> str:
+    """`SUBSTR(str, start, len)` -> `SUBSTRING(str, start, len)`.
+
+    Args:
+        args: The call's already-translated arguments; must have length 3.
+
+    Returns:
+        The equivalent `SUBSTRING` SQL expression.
+
+    Raises:
+        _ArgCountError: `args` doesn't have exactly 3 elements.
+    """
     if len(args) != 3:
         raise _ArgCountError
     return f"SUBSTRING({', '.join(args)})"
@@ -147,10 +259,22 @@ _BARE_IDENTIFIER_REPLACEMENTS = {
 
 
 class _Translator:
+    """Recursive-descent translator: walks an expression once, tracking any
+    function names it couldn't translate along the way."""
+
     def __init__(self) -> None:
         self.unrecognized: list[str] = []
 
     def translate(self, expr: str) -> str:
+        """Translate `expr`, recursing into every function call's arguments.
+
+        Args:
+            expr: The expression-language text to translate.
+
+        Returns:
+            The translated SQL text. Any unrecognized function calls
+            encountered are recorded on `self.unrecognized` as a side effect.
+        """
         out: list[str] = []
         i = 0
         n = len(expr)
@@ -184,6 +308,18 @@ class _Translator:
         return "".join(out)
 
     def _render_call(self, ident: str, args: list[str]) -> str:
+        """Render one already-translated function call.
+
+        Args:
+            ident: The function name as written in the source expression.
+            args: The call's arguments, already translated recursively.
+
+        Returns:
+            The SQL translation if `ident` is a known function called with a
+            valid argument count; otherwise `ident` re-assembled verbatim
+            with its (translated) arguments, and `ident` is appended to
+            `self.unrecognized`.
+        """
         renderer = _FUNCTION_RENDERERS.get(ident.upper())
         if renderer is not None:
             try:

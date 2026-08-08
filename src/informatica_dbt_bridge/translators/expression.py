@@ -11,6 +11,20 @@ _OUTPUT_PORT_TYPES = {"OUTPUT", "INPUT/OUTPUT"}
 
 
 def translate_expression_transformation(node: TransformationNode, *, upstream_cte: str) -> Cte:
+    """Translate an Expression transformation into `select *, <derived columns> from <upstream>`.
+
+    Only output ports with an EXPRESSION become explicit columns - plain
+    pass-through ports are already covered by the `*`.
+
+    Args:
+        node: The Expression `TransformationNode`.
+        upstream_cte: The (already snake_cased) name of the CTE this
+            transformation reads from.
+
+    Returns:
+        The translated Cte. Includes a TranslationNote for every expression
+        function that couldn't be translated (see `translate_expression`).
+    """
     notes: list[TranslationNote] = []
     derived_columns: list[str] = []
 
