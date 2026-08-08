@@ -62,7 +62,10 @@ def _translate_node(
         )
     translator = _SIMPLE_TRANSLATORS.get(node.type)
     if translator is not None:
-        assert upstream is not None, f"{node.name!r} has no upstream but isn't a Source Qualifier"
+        if upstream is None:
+            raise ValueError(
+                f"{node.name!r} ({node.type}) has no upstream transformation feeding it"
+            )
         return translator(node, upstream_cte=snake_case(upstream))
     return _unsupported(node, upstream_cte=snake_case(upstream) if upstream else None)
 

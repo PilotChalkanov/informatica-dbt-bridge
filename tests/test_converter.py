@@ -111,6 +111,18 @@ def test_convert_mapping_flags_unsupported_transformation_type_with_todo() -> No
     assert any("Aggregator" in note.message for note in result.notes)
 
 
+def test_convert_mapping_raises_on_transformation_with_no_upstream() -> None:
+    xml = GOLDEN_MAPPING_XML.replace(
+        "</MAPPING>",
+        '<TRANSFORMATION NAME="FIL_ORPHAN" TYPE="Filter">'
+        '<TABLEATTRIBUTE NAME="Filter Condition" VALUE="1=1"/>'
+        "</TRANSFORMATION></MAPPING>",
+    )
+
+    with pytest.raises(ValueError, match="FIL_ORPHAN"):
+        convert_mapping(xml, source_system="erp")
+
+
 def test_convert_mapping_raises_on_multiple_sources() -> None:
     xml = GOLDEN_MAPPING_XML.replace(
         "</SOURCE>",
