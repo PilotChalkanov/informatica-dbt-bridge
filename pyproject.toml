@@ -40,3 +40,13 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
 strict = true
+
+[tool.bandit]
+# B608 (possible SQL injection via string-built queries) is a structural
+# false positive for this whole codebase: the f-strings it flags in
+# render.py/translators/*.py are the tool's *output* - dbt model SQL text
+# written to a .sql file - never a query string handed to a DB driver or
+# cursor.execute(). There is no live SQL execution anywhere in this
+# project. B405/B314 (stdlib XML parsing) are intentionally left active -
+# see the open question about untrusted PowerCenter XML exports.
+skips = ["B608"]
