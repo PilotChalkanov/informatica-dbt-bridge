@@ -12,6 +12,19 @@ _OUTPUT_PORT_TYPES = {"OUTPUT", "INPUT/OUTPUT"}
 def translate_source_qualifier(
     node: TransformationNode, *, source_system: str, source_table: str
 ) -> Cte:
+    """Translate a Source Qualifier into a base `select ... from {{ source(...) }}` CTE.
+
+    A `Sql Query` override, if present, replaces the generated select verbatim.
+    A `Source Filter`, if present, becomes a `where` clause.
+
+    Args:
+        node: The Source Qualifier `TransformationNode`.
+        source_system: The dbt `source()` name to read from, e.g. `"erp"`.
+        source_table: The dbt `source()` table name, e.g. `"orders"`.
+
+    Returns:
+        The translated Cte.
+    """
     override = node.attribute("Sql Query")
     if override:
         return Cte(name=snake_case(node.name), sql=override)

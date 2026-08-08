@@ -33,6 +33,22 @@ class PowerCenterParseError(Exception):
 
 
 def parse_mapping(xml_text: str, mapping_name: str | None = None) -> Mapping:
+    """Parse a single MAPPING out of a PowerCenter POWERMART export.
+
+    Args:
+        xml_text: The full POWERMART export XML, as text.
+        mapping_name: The `NAME` of the `MAPPING` to parse. If None, the first
+            `MAPPING` found in the export's folder is used.
+
+    Returns:
+        The parsed Mapping, with its sources, targets, transformations, and
+        connectors.
+
+    Raises:
+        PowerCenterParseError: The export has no `FOLDER`, no `MAPPING`, the
+            requested `mapping_name` isn't present, or a required attribute
+            is missing somewhere in the tree.
+    """
     root = ET.fromstring(xml_text)  # nosec B314 - see accepted-risk note on the import above
 
     folder = root.find(".//FOLDER")
@@ -70,6 +86,14 @@ def parse_mapping(xml_text: str, mapping_name: str | None = None) -> Mapping:
 
 
 def _parse_source(elem: ET.Element) -> SourceDef:
+    """Parse a `SOURCE` element and its `SOURCEFIELD` children.
+
+    Args:
+        elem: The `<SOURCE>` element.
+
+    Returns:
+        The parsed SourceDef.
+    """
     return SourceDef(
         name=_require(elem, "NAME"),
         database_type=elem.get("DATABASETYPE"),
@@ -78,6 +102,14 @@ def _parse_source(elem: ET.Element) -> SourceDef:
 
 
 def _parse_source_field(elem: ET.Element) -> SourceField:
+    """Parse a single `SOURCEFIELD` element.
+
+    Args:
+        elem: The `<SOURCEFIELD>` element.
+
+    Returns:
+        The parsed SourceField.
+    """
     precision = elem.get("PRECISION")
     scale = elem.get("SCALE")
     return SourceField(
@@ -91,6 +123,14 @@ def _parse_source_field(elem: ET.Element) -> SourceField:
 
 
 def _parse_target(elem: ET.Element) -> TargetDef:
+    """Parse a `TARGET` element and its `TARGETFIELD` children.
+
+    Args:
+        elem: The `<TARGET>` element.
+
+    Returns:
+        The parsed TargetDef.
+    """
     return TargetDef(
         name=_require(elem, "NAME"),
         fields=[
@@ -101,6 +141,14 @@ def _parse_target(elem: ET.Element) -> TargetDef:
 
 
 def _parse_transformation(elem: ET.Element) -> TransformationNode:
+    """Parse a `TRANSFORMATION` element: its ports and `TABLEATTRIBUTE` config.
+
+    Args:
+        elem: The `<TRANSFORMATION>` element.
+
+    Returns:
+        The parsed TransformationNode.
+    """
     return TransformationNode(
         name=_require(elem, "NAME"),
         type=_require(elem, "TYPE"),
@@ -113,6 +161,14 @@ def _parse_transformation(elem: ET.Element) -> TransformationNode:
 
 
 def _parse_port(elem: ET.Element) -> Port:
+    """Parse a single `TRANSFORMFIELD` element.
+
+    Args:
+        elem: The `<TRANSFORMFIELD>` element.
+
+    Returns:
+        The parsed Port.
+    """
     return Port(
         name=_require(elem, "NAME"),
         port_type=_require(elem, "PORTTYPE"),
@@ -122,6 +178,14 @@ def _parse_port(elem: ET.Element) -> Port:
 
 
 def _parse_connector(elem: ET.Element) -> Connector:
+    """Parse a single `CONNECTOR` edge.
+
+    Args:
+        elem: The `<CONNECTOR>` element.
+
+    Returns:
+        The parsed Connector.
+    """
     return Connector(
         from_instance=_require(elem, "FROMINSTANCE"),
         from_field=_require(elem, "FROMFIELD"),
@@ -131,6 +195,18 @@ def _parse_connector(elem: ET.Element) -> Connector:
 
 
 def _require(elem: ET.Element, attr: str) -> str:
+    """Return one of `elem`'s attributes, raising if it's absent.
+
+    Args:
+        elem: The element to read from.
+        attr: The attribute name to look up.
+
+    Returns:
+        The attribute's string value.
+
+    Raises:
+        PowerCenterParseError: `elem` has no `attr` attribute.
+    """
     value = elem.get(attr)
     if value is None:
         raise PowerCenterParseError(f"<{elem.tag}> is missing required attribute {attr!r}")

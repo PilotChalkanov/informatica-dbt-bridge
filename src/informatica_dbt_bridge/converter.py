@@ -24,6 +24,9 @@ _SIMPLE_TRANSLATORS = {
 
 @dataclass(frozen=True)
 class ConversionResult:
+    """The output of converting one PowerCenter mapping: the generated dbt model SQL
+    plus every TranslationNote raised along the way."""
+
     mapping_name: str
     sql: str
     notes: list[TranslationNote] = field(default_factory=list)
@@ -32,6 +35,32 @@ class ConversionResult:
 def convert_mapping(
     xml_text: str, *, source_system: str, mapping_name: str | None = None
 ) -> ConversionResult:
+    """Convert a PowerCenter mapping XML export into one dbt model.
+
+    Parses the mapping, orders its transformations via the DAG, translates
+    each into a CTE, and renders the chain into the final "with ... select"
+    SQL text mapped onto the target's field order.
+
+    Args:
+        xml_text: The full POWERMART export XML, as text.
+        source_system: The dbt `source()` name this mapping's Source
+            Qualifier reads from.
+        mapping_name: The `NAME` of the `MAPPING` to convert, if the export
+            contains more than one. Defaults to the first mapping found.
+
+    Returns:
+        A ConversionResult with the generated SQL and every TranslationNote
+        raised by its translators (empty if nothing needed manual review).
+
+    Raises:
+        PowerCenterParseError: The XML doesn't match the expected shape.
+        CycleError: The mapping's dataflow graph has a cycle.
+        ValueError: The mapping has no SOURCE, no TARGET, or a transformation
+            with no upstream feeding it.
+        NotImplementedError: The mapping has more than one SOURCE, or a
+            transformation with fan-in from more than one upstream - both
+            need Joiner/Union support that doesn't exist yet.
+    """
     mapping = parse_mapping(xml_text, mapping_name=mapping_name)
     order = topological_order(mapping)
     upstream_of = _build_upstream_map(mapping)
@@ -56,6 +85,26 @@ def convert_mapping(
 def _translate_node(
     node: TransformationNode, upstream: str | None, source: SourceDef, source_system: str
 ) -> Cte:
+    """Dispatch one transformation to its translator.
+
+    Args:
+        node: The transformation to translate.
+        upstream: The (raw, not yet snake_cased) name of the single upstream
+            transformation feeding `node`, or None if it has none (only
+            valid for a Source Qualifier).
+        source: The mapping's resolved SOURCE, used when `node` is a Source
+            Qualifier.
+        source_system: The dbt `source()` name to pass through to a Source
+            Qualifier translation.
+
+    Returns:
+        The translated Cte, from the matching translator, or from the
+        unsupported-type fallback if `node.type` has no translator
+        registered.
+
+    Raises:
+        ValueError: `node.type` has a translator but `upstream` is None.
+    """
     if node.type == "Source Qualifier":
         return translate_source_qualifier(
             node, source_system=source_system, source_table=source.name.lower()
@@ -71,6 +120,19 @@ def _translate_node(
 
 
 def _unsupported(node: TransformationNode, *, upstream_cte: str | None) -> Cte:
+    """Fallback for a TYPE with no translator.
+
+    Never silently drops the node: emits a TODO-commented passthrough CTE
+    plus a manual-review TranslationNote.
+
+    Args:
+        node: The transformation with no registered translator.
+        upstream_cte: The (already snake_cased) upstream CTE name, or None
+            if there isn't one.
+
+    Returns:
+        The fallback Cte, with one TranslationNote flagging it for review.
+    """
     from_clause = f"from {upstream_cte}" if upstream_cte else "-- TODO: no upstream resolved"
     sql = (
         f"select *  -- TODO(pc-migration): {node.type} not translated, manual review needed\n"
@@ -84,6 +146,22 @@ def _unsupported(node: TransformationNode, *, upstream_cte: str | None) -> Cte:
 
 
 def _build_upstream_map(mapping: Mapping) -> dict[str, str]:
+    """Map each transformation to its single upstream transformation's name.
+
+    Args:
+        mapping: The mapping whose CONNECTOR edges should be reduced to a
+            single predecessor per transformation.
+
+    Returns:
+        A dict from transformation instance name to its one upstream
+        transformation's instance name. Transformations with no upstream
+        (a Source Qualifier, or an unconnected node) have no entry.
+
+    Raises:
+        NotImplementedError: A transformation is fed by more than one
+            upstream transformation (fan-in) - that needs Joiner/Union
+            support, which doesn't exist yet.
+    """
     transformation_names = {t.name for t in mapping.transformations}
     predecessors: dict[str, set[str]] = {}
     for connector in mapping.connectors:
@@ -105,6 +183,19 @@ def _build_upstream_map(mapping: Mapping) -> dict[str, str]:
 
 
 def _resolve_single_source(mapping: Mapping) -> SourceDef:
+    """Return the mapping's one SOURCE.
+
+    Args:
+        mapping: The mapping to resolve a source for.
+
+    Returns:
+        The mapping's single SourceDef.
+
+    Raises:
+        ValueError: The mapping has no SOURCE.
+        NotImplementedError: The mapping has more than one SOURCE - that
+            needs Joiner support, which doesn't exist yet.
+    """
     if not mapping.sources:
         raise ValueError(f"mapping {mapping.name!r} has no SOURCE")
     if len(mapping.sources) > 1:
