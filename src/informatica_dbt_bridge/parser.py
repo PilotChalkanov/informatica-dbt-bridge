@@ -17,6 +17,8 @@ import xml.etree.ElementTree as ET  # nosec B405
 
 from informatica_dbt_bridge.models import (
     Connector,
+    FieldDependency,
+    Group,
     Mapping,
     Port,
     SourceDef,
@@ -141,7 +143,9 @@ def _parse_target(elem: ET.Element) -> TargetDef:
 
 
 def _parse_transformation(elem: ET.Element) -> TransformationNode:
-    """Parse a `TRANSFORMATION` element: its ports and `TABLEATTRIBUTE` config.
+    """Parse a `TRANSFORMATION` element: its ports, `TABLEATTRIBUTE` config, and (for
+    multi-group transformations like a Union-shaped Custom Transformation) its
+    `TEMPLATENAME`, `GROUP` children, and `FIELDDEPENDENCY` children.
 
     Args:
         elem: The `<TRANSFORMATION>` element.
@@ -157,6 +161,9 @@ def _parse_transformation(elem: ET.Element) -> TransformationNode:
             TableAttribute(name=_require(a, "NAME"), value=a.get("VALUE") or "")
             for a in elem.findall("TABLEATTRIBUTE")
         ],
+        template_name=elem.get("TEMPLATENAME"),
+        groups=[_parse_group(g) for g in elem.findall("GROUP")],
+        field_dependencies=[_parse_field_dependency(fd) for fd in elem.findall("FIELDDEPENDENCY")],
     )
 
 
@@ -174,6 +181,41 @@ def _parse_port(elem: ET.Element) -> Port:
         port_type=_require(elem, "PORTTYPE"),
         datatype=elem.get("DATATYPE"),
         expression=elem.get("EXPRESSION"),
+        group=elem.get("GROUP"),
+        ref_field=elem.get("REF_FIELD"),
+    )
+
+
+def _parse_group(elem: ET.Element) -> Group:
+    """Parse a single `GROUP` element (a named port group on a multi-group
+    transformation, e.g. a Union-shaped Custom Transformation or a Router).
+
+    Args:
+        elem: The `<GROUP>` element.
+
+    Returns:
+        The parsed Group.
+    """
+    return Group(
+        name=_require(elem, "NAME"),
+        type=_require(elem, "TYPE"),
+        order=int(_require(elem, "ORDER")),
+        expression=elem.get("EXPRESSION"),
+    )
+
+
+def _parse_field_dependency(elem: ET.Element) -> FieldDependency:
+    """Parse a single `FIELDDEPENDENCY` element.
+
+    Args:
+        elem: The `<FIELDDEPENDENCY>` element.
+
+    Returns:
+        The parsed FieldDependency.
+    """
+    return FieldDependency(
+        input_field=_require(elem, "INPUTFIELD"),
+        output_field=_require(elem, "OUTPUTFIELD"),
     )
 
 

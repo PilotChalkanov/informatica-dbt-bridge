@@ -17,6 +17,8 @@ class Port:
     port_type: str  # "INPUT", "OUTPUT", "INPUT/OUTPUT"
     datatype: str | None = None
     expression: str | None = None
+    group: str | None = None  # the owning `GROUP`'s NAME, on multi-group transformations (Union)
+    ref_field: str | None = None  # `REF_FIELD`: the source INPUT port this port renames (Router)
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,27 @@ class TableAttribute:
 
 
 @dataclass(frozen=True)
+class Group:
+    """One `GROUP` child of a multi-group transformation (e.g. a Union or Router):
+    a named port group."""
+
+    name: str
+    type: str  # "INPUT", "OUTPUT", or (Router's catch-all) "OUTPUT/DEFAULT"
+    order: int
+    expression: str | None = None  # a Router OUTPUT group's filter condition, verbatim
+
+
+@dataclass(frozen=True)
+class FieldDependency:
+    """One `FIELDDEPENDENCY` child: an authoritative input-field -> output-field mapping
+    (e.g. a Union's per-branch column aliasing) - the source of truth for which input
+    port feeds which output port, not to be inferred from name- or position-matching."""
+
+    input_field: str
+    output_field: str
+
+
+@dataclass(frozen=True)
 class TransformationNode:
     """One `TRANSFORMATION` element: a single node in the mapping's dataflow graph."""
 
@@ -35,6 +58,9 @@ class TransformationNode:
     type: str
     ports: list[Port] = field(default_factory=list)
     attributes: list[TableAttribute] = field(default_factory=list)
+    template_name: str | None = None  # `TEMPLATENAME`, e.g. "Union Transformation"
+    groups: list[Group] = field(default_factory=list)
+    field_dependencies: list[FieldDependency] = field(default_factory=list)
 
     def attribute(self, name: str) -> str | None:
         """Look up one of this transformation's `TABLEATTRIBUTE` values by name.

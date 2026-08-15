@@ -8,6 +8,7 @@ via `ExpressionResult.unrecognized_functions` — never silently guessed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -252,6 +253,101 @@ _FUNCTION_RENDERERS = {
     "SUBSTR": _render_substr,
 }
 
+# Aggregate functions that are already valid SQL as written - per skill file
+# §4 ("same, only valid inside Aggregator/Rank context") - so only their
+# arguments need recursive translation, not the call itself. Recognized (no
+# TranslationNote), unlike a genuinely unsupported function. Deliberately
+# excludes FIRST/LAST, which need a FIRST_VALUE()/LAST_VALUE() OVER (...)
+# rewrite this translator doesn't attempt yet - those stay unrecognized.
+_PASSTHROUGH_FUNCTIONS = {"SUM", "COUNT", "AVG", "MIN", "MAX"}
+
+# All PowerCenter Aggregator-function names, per the Transformation Language
+# Reference's aggregate-functions category - a superset of
+# `_PASSTHROUGH_FUNCTIONS`. Used to recognize a call as *some* aggregate
+# (even one this translator can't render, like MEDIAN/FIRST/LAST) so callers
+# like the Aggregator translator can distinguish "untranslatable aggregate"
+# from "not an aggregate at all".
+AGGREGATE_FUNCTION_NAMES = {
+    "AVG",
+    "COUNT",
+    "FIRST",
+    "LAST",
+    "MAX",
+    "MEDIAN",
+    "MIN",
+    "PERCENTILE",
+    "STDDEV",
+    "SUM",
+    "VARIANCE",
+}
+
+
+def _render_aggregate_passthrough(ident: str, args: list[str]) -> str:
+    """`NAME(value)` -> unchanged; `NAME(value, cond)` -> `NAME(CASE WHEN cond THEN value END)`.
+
+    Implements PowerCenter's Aggregator conditional-clause argument (docs:
+    transformation-guide/aggregator-transformation/aggregate-expressions/
+    conditional-clauses.html): a second boolean argument on SUM/COUNT/AVG/
+    MIN/MAX restricts which rows get aggregated, e.g.
+    `SUM(AMOUNT, STATUS = 'ACTIVE')` sums `AMOUNT` only over rows where
+    `STATUS = 'ACTIVE'`.
+
+    Args:
+        ident: The function name as written at the call site (preserves
+            original casing, unlike the other renderers which hardcode SQL
+            keywords).
+        args: The call's already-translated arguments; must have length 1 or
+            2.
+
+    Returns:
+        The equivalent SQL aggregate call.
+
+    Raises:
+        _ArgCountError: `args` doesn't have exactly 1 or 2 elements.
+    """
+    if len(args) == 1:
+        return f"{ident}({args[0]})"
+    if len(args) == 2:
+        value, condition = args
+        return f"{ident}(CASE WHEN {condition} THEN {value} END)"
+    raise _ArgCountError
+
+
+def is_aggregate_function_call(expr: str) -> bool:
+    """Whether `expr` is a single top-level call to a PowerCenter Aggregator function.
+
+    "Aggregator function" here means any name in `AGGREGATE_FUNCTION_NAMES`
+    (SUM, AVG, COUNT, MAX, MIN, MEDIAN, FIRST, LAST, PERCENTILE, STDDEV,
+    VARIANCE - the PowerCenter Transformation Language Reference's
+    aggregate-functions category), regardless of whether this translator can
+    actually render it as SQL. Used by the Aggregator translator to tell a
+    genuine (if perhaps untranslatable) aggregate expression apart from a
+    plain non-aggregate one - PowerCenter resolves the latter to a last-row
+    value with no safe `GROUP BY` equivalent (see the Aggregator
+    transformation guide's "non-aggregate expressions" note).
+
+    Args:
+        expr: A raw Informatica expression-language string.
+
+    Returns:
+        True if `expr`, stripped of surrounding whitespace, is exactly one
+        call `FUNC(...)` where `FUNC` is a known aggregate function name and
+        the parens span the whole expression; False otherwise (including for
+        expressions that merely contain an aggregate call, e.g. `SUM(A) + 1`
+        or `IIF(x, SUM(A), 0)`, which this translator doesn't attempt to
+        recognize as GROUP BY-safe today).
+    """
+    stripped = expr.strip()
+    match = re.match(r"^([A-Za-z_]\w*)\s*\(", stripped)
+    if match is None or match.group(1).upper() not in AGGREGATE_FUNCTION_NAMES:
+        return False
+    try:
+        close_idx = _find_matching_paren(stripped, match.end() - 1)
+    except ValueError:
+        return False
+    return close_idx == len(stripped) - 1
+
+
 _BARE_IDENTIFIER_REPLACEMENTS = {
     "SYSDATE": "CURRENT_TIMESTAMP",
     "SYSTIMESTAMP": "CURRENT_TIMESTAMP",
@@ -316,14 +412,20 @@ class _Translator:
 
         Returns:
             The SQL translation if `ident` is a known function called with a
-            valid argument count; otherwise `ident` re-assembled verbatim
-            with its (translated) arguments, and `ident` is appended to
-            `self.unrecognized`.
+            valid argument count; `ident` re-assembled verbatim with its
+            (translated) arguments if it's a recognized passthrough function
+            (e.g. `SUM`); otherwise the same verbatim reassembly, but with
+            `ident` appended to `self.unrecognized`.
         """
         renderer = _FUNCTION_RENDERERS.get(ident.upper())
         if renderer is not None:
             try:
                 return renderer(args)
+            except _ArgCountError:
+                pass
+        if ident.upper() in _PASSTHROUGH_FUNCTIONS:
+            try:
+                return _render_aggregate_passthrough(ident, args)
             except _ArgCountError:
                 pass
         self.unrecognized.append(ident)
