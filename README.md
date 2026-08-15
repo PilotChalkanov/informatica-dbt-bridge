@@ -44,18 +44,20 @@ New to PowerCenter or dbt? Quick guides to each system's own data model and term
 
 ## Status
 
-Working today: parsing, DAG ordering, and translators for **Source Qualifier**, **Filter**, and
-**Expression**, wired end-to-end through `convert_mapping()` — TDD throughout, see `git log`.
+Working today: parsing, DAG ordering, and translators for **Source Qualifier**, **Filter**,
+**Expression**, **Aggregator**, **Lookup** (connected), **Joiner** (connected), **Union**, and
+**Router**, wired end-to-end through `convert_mapping()` — TDD throughout, see `git log`.
 
-Not yet built: Aggregator/Lookup/Joiner/Union/Router/Rank translators, `schema.yml` and
-migration-report generation, a CLI, and an executable dbt/DuckDB integration test.
+Not yet built: **Sorter**, **Rank**, and **Sequence Generator** translators — planned for a later
+stage of development. Also not yet built: `schema.yml` and migration-report generation, a CLI, and
+an executable dbt/DuckDB integration test.
 
 ## Getting started
 
 ```bash
 uv sync
-uv run pytest              # 53 tests
-uv run coverage report -m  # 94% branch coverage
+uv run pytest              # 196 tests
+uv run coverage report -m  # 98% branch coverage
 ```
 
 ```python
