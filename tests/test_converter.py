@@ -103,12 +103,15 @@ def test_convert_mapping_produces_expected_sql_for_sq_filter_expression_chain() 
 
 
 def test_convert_mapping_flags_unsupported_transformation_type_with_todo() -> None:
-    xml = GOLDEN_MAPPING_XML.replace('TYPE="Filter"', 'TYPE="Aggregator"')
+    # Router isn't wired into _SIMPLE_TRANSLATORS yet (see architecture.md's
+    # build order) - used here only as a stand-in "some unsupported type",
+    # not to test Router-specific behavior.
+    xml = GOLDEN_MAPPING_XML.replace('TYPE="Filter"', 'TYPE="Router"')
 
     result = convert_mapping(xml, source_system="erp")
 
-    assert "TODO(pc-migration): Aggregator not translated" in result.sql
-    assert any("Aggregator" in note.message for note in result.notes)
+    assert "TODO(pc-migration): Router not translated" in result.sql
+    assert any("Router" in note.message for note in result.notes)
 
 
 def test_convert_mapping_raises_on_transformation_with_no_upstream() -> None:
@@ -142,4 +145,71 @@ def test_convert_mapping_raises_on_fan_in_from_two_upstream_transformations() ->
     )
 
     with pytest.raises(NotImplementedError, match="multiple upstream"):
+        convert_mapping(xml, source_system="erp")
+
+
+LOOKUP_MAPPING_XML = """
+<POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
+  <REPOSITORY NAME="REPO" VERSION="1">
+    <FOLDER NAME="MyFolder">
+
+      <SOURCE NAME="ORDERS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+        <SOURCEFIELD NAME="CUST_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">
+        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>
+        <TARGETFIELD NAME="REGION" DATATYPE="varchar"/>
+      </TARGET>
+
+      <MAPPING NAME="m_LOAD_ORDERS_WITH_LOOKUP">
+        <TRANSFORMATION NAME="SQ_ORDERS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="ORDER_ID" PORTTYPE="OUTPUT" DATATYPE="decimal"/>
+          <TRANSFORMFIELD NAME="CUST_ID" PORTTYPE="OUTPUT" DATATYPE="decimal"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="LKP_CUSTOMER" TYPE="Lookup Procedure">
+          <TRANSFORMFIELD NAME="IN_CUST_ID" PORTTYPE="INPUT"/>
+          <TRANSFORMFIELD NAME="REGION" PORTTYPE="OUTPUT"/>
+          <TABLEATTRIBUTE NAME="Lookup condition" VALUE="CUST_ID = IN_CUST_ID"/>
+          <TABLEATTRIBUTE NAME="Lookup table name" VALUE="CUSTOMER"/>
+        </TRANSFORMATION>
+
+        <CONNECTOR FROMINSTANCE="SQ_ORDERS" FROMFIELD="CUST_ID"
+                    TOINSTANCE="LKP_CUSTOMER" TOFIELD="IN_CUST_ID"/>
+      </MAPPING>
+
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>
+"""
+
+
+def test_convert_mapping_translates_lookup_with_left_join() -> None:
+    result = convert_mapping(LOOKUP_MAPPING_XML, source_system="erp")
+
+    assert result.mapping_name == "m_LOAD_ORDERS_WITH_LOOKUP"
+    assert "left join {{ source('erp', 'customer') }} as lkp_customer" in result.sql
+    assert "on lkp_customer.REGION = sq_orders.IN_CUST_ID" not in result.sql
+    assert result.notes == []
+
+
+def test_convert_mapping_raises_when_lookup_table_name_attribute_missing() -> None:
+    xml = LOOKUP_MAPPING_XML.replace(
+        '<TABLEATTRIBUTE NAME="Lookup table name" VALUE="CUSTOMER"/>', ""
+    )
+
+    with pytest.raises(ValueError, match="Lookup table name"):
+        convert_mapping(xml, source_system="erp")
+
+
+def test_convert_mapping_raises_on_lookup_with_no_upstream() -> None:
+    xml = LOOKUP_MAPPING_XML.replace(
+        '<CONNECTOR FROMINSTANCE="SQ_ORDERS" FROMFIELD="CUST_ID"\n'
+        '                    TOINSTANCE="LKP_CUSTOMER" TOFIELD="IN_CUST_ID"/>',
+        "",
+    )
+
+    with pytest.raises(ValueError, match="LKP_CUSTOMER"):
         convert_mapping(xml, source_system="erp")

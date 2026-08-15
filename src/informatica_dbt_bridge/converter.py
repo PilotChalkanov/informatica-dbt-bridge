@@ -12,13 +12,16 @@ from informatica_dbt_bridge.models import Mapping, SourceDef, TransformationNode
 from informatica_dbt_bridge.naming import snake_case
 from informatica_dbt_bridge.parser import parse_mapping
 from informatica_dbt_bridge.render import render_model
+from informatica_dbt_bridge.translators.aggregator import translate_aggregator
 from informatica_dbt_bridge.translators.expression import translate_expression_transformation
 from informatica_dbt_bridge.translators.filter import translate_filter
+from informatica_dbt_bridge.translators.lookup import translate_lookup
 from informatica_dbt_bridge.translators.source_qualifier import translate_source_qualifier
 
 _SIMPLE_TRANSLATORS = {
     "Filter": translate_filter,
     "Expression": translate_expression_transformation,
+    "Aggregator": translate_aggregator,
 }
 
 
@@ -103,11 +106,31 @@ def _translate_node(
         registered.
 
     Raises:
-        ValueError: `node.type` has a translator but `upstream` is None.
+        ValueError: `node.type` has a translator but `upstream` is None, or
+            `node.type` is `"Lookup Procedure"` with no `Lookup table name`
+            attribute (there's no reliable way to resolve which table it
+            joins against otherwise - see `translators/lookup.py`).
     """
     if node.type == "Source Qualifier":
         return translate_source_qualifier(
             node, source_system=source_system, source_table=source.name.lower()
+        )
+    if node.type == "Lookup Procedure":
+        if upstream is None:
+            raise ValueError(
+                f"{node.name!r} ({node.type}) has no upstream transformation feeding it"
+            )
+        lookup_table = node.attribute("Lookup table name")
+        if not lookup_table:
+            raise ValueError(
+                f"{node.name!r} (Lookup Procedure) has no 'Lookup table name' attribute; "
+                "cannot resolve which table to join against"
+            )
+        return translate_lookup(
+            node,
+            upstream_cte=snake_case(upstream),
+            lookup_source_system=source_system,
+            lookup_table=lookup_table.lower(),
         )
     translator = _SIMPLE_TRANSLATORS.get(node.type)
     if translator is not None:
