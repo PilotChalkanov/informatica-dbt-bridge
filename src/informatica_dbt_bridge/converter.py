@@ -652,15 +652,18 @@ def _resolve_single_source(mapping: Mapping) -> SourceDef:
 
     Raises:
         ValueError: The mapping has no SOURCE.
-        NotImplementedError: The mapping has more than one SOURCE - that
-            needs Joiner support, which doesn't exist yet.
+        NotImplementedError: The mapping has more than one SOURCE - resolving
+            which SOURCE feeds which Source Qualifier needs per-instance
+            INSTANCE/CONNECTOR resolution this parser doesn't do yet (a
+            separate, deliberately deferred follow-up - not a Joiner
+            limitation; Joiner itself is supported).
     """
     if not mapping.sources:
         raise ValueError(f"mapping {mapping.name!r} has no SOURCE")
     if len(mapping.sources) > 1:
         raise NotImplementedError(
             f"mapping {mapping.name!r} has multiple sources "
-            f"{[s.name for s in mapping.sources]}; multi-source mappings (Joiner) "
-            "aren't supported yet"
+            f"{[s.name for s in mapping.sources]}; per-Source-Qualifier source "
+            "resolution isn't supported yet"
         )
     return mapping.sources[0]
