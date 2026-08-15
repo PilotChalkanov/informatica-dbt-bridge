@@ -238,3 +238,83 @@ def test_parse_mapping_reads_field_dependencies() -> None:
         FieldDependency(input_field="LOCATION_ID2", output_field="LOCATION_ID"),
         FieldDependency(input_field="LOCATION_ID3", output_field="LOCATION_ID"),
     ]
+
+
+# A trimmed-down version of the real demo export's RTR_REGION (a Router: one
+# INPUT group, two filtered OUTPUT groups each with a GROUP-level EXPRESSION,
+# and a TYPE="OUTPUT/DEFAULT" catch-all group, with REF_FIELD on every
+# OUTPUT-group TRANSFORMFIELD).
+ROUTER_SHAPED_MAPPING_XML = """
+<POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
+  <REPOSITORY NAME="REPO" VERSION="1">
+    <FOLDER NAME="MyFolder">
+
+      <SOURCE NAME="ORDERS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">
+        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>
+      </TARGET>
+
+      <MAPPING NAME="m_LOAD_ORDERS">
+        <TRANSFORMATION NAME="SQ_ORDERS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="REGION" PORTTYPE="OUTPUT" DATATYPE="string"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="RTR_REGION" TYPE="Router">
+          <GROUP NAME="INPUT" TYPE="INPUT" ORDER="1"/>
+          <GROUP NAME="G_APAC" TYPE="OUTPUT" ORDER="2" EXPRESSION="REGION = 'APAC'"/>
+          <GROUP NAME="DEFAULT1" TYPE="OUTPUT/DEFAULT" ORDER="3"/>
+          <TRANSFORMFIELD NAME="REGION" GROUP="INPUT" PORTTYPE="INPUT" DATATYPE="string"/>
+          <TRANSFORMFIELD NAME="REGION1" GROUP="G_APAC" PORTTYPE="OUTPUT" DATATYPE="string"
+                           REF_FIELD="REGION"/>
+          <TRANSFORMFIELD NAME="REGION2" GROUP="DEFAULT1" PORTTYPE="OUTPUT" DATATYPE="string"
+                           REF_FIELD="REGION"/>
+        </TRANSFORMATION>
+
+        <CONNECTOR FROMINSTANCE="SQ_ORDERS" FROMFIELD="REGION"
+                    TOINSTANCE="RTR_REGION" TOFIELD="REGION"/>
+      </MAPPING>
+
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>
+"""
+
+
+def test_parse_mapping_reads_group_expression() -> None:
+    mapping = parse_mapping(ROUTER_SHAPED_MAPPING_XML)
+
+    router = mapping.transformation("RTR_REGION")
+
+    assert router.groups == [
+        Group(name="INPUT", type="INPUT", order=1, expression=None),
+        Group(name="G_APAC", type="OUTPUT", order=2, expression="REGION = 'APAC'"),
+        Group(name="DEFAULT1", type="OUTPUT/DEFAULT", order=3, expression=None),
+    ]
+
+
+def test_parse_mapping_reads_ref_field_on_ports() -> None:
+    mapping = parse_mapping(ROUTER_SHAPED_MAPPING_XML)
+
+    router = mapping.transformation("RTR_REGION")
+
+    ref_fields = {p.name: p.ref_field for p in router.ports}
+    assert ref_fields == {"REGION": None, "REGION1": "REGION", "REGION2": "REGION"}
+
+
+def test_parse_mapping_ordinary_group_has_no_expression() -> None:
+    mapping = parse_mapping(UNION_SHAPED_MAPPING_XML)
+
+    union = mapping.transformation("UN_REGIONS")
+
+    assert all(g.expression is None for g in union.groups)
+
+
+def test_parse_mapping_ordinary_port_has_no_ref_field() -> None:
+    mapping = parse_mapping(SIMPLE_MAPPING_XML)
+
+    fil = mapping.transformation("FIL_ACTIVE")
+
+    assert all(p.ref_field is None for p in fil.ports)

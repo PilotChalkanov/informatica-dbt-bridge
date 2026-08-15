@@ -18,6 +18,7 @@ class Port:
     datatype: str | None = None
     expression: str | None = None
     group: str | None = None  # the owning `GROUP`'s NAME, on multi-group transformations (Union)
+    ref_field: str | None = None  # `REF_FIELD`: the source INPUT port this port renames (Router)
 
 
 @dataclass(frozen=True)
@@ -30,11 +31,13 @@ class TableAttribute:
 
 @dataclass(frozen=True)
 class Group:
-    """One `GROUP` child of a multi-group transformation (e.g. a Union): a named port group."""
+    """One `GROUP` child of a multi-group transformation (e.g. a Union or Router):
+    a named port group."""
 
     name: str
-    type: str  # "INPUT" or "OUTPUT"
+    type: str  # "INPUT", "OUTPUT", or (Router's catch-all) "OUTPUT/DEFAULT"
     order: int
+    expression: str | None = None  # a Router OUTPUT group's filter condition, verbatim
 
 
 @dataclass(frozen=True)

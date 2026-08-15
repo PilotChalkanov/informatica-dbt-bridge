@@ -182,12 +182,13 @@ def _parse_port(elem: ET.Element) -> Port:
         datatype=elem.get("DATATYPE"),
         expression=elem.get("EXPRESSION"),
         group=elem.get("GROUP"),
+        ref_field=elem.get("REF_FIELD"),
     )
 
 
 def _parse_group(elem: ET.Element) -> Group:
     """Parse a single `GROUP` element (a named port group on a multi-group
-    transformation, e.g. a Union-shaped Custom Transformation).
+    transformation, e.g. a Union-shaped Custom Transformation or a Router).
 
     Args:
         elem: The `<GROUP>` element.
@@ -199,6 +200,7 @@ def _parse_group(elem: ET.Element) -> Group:
         name=_require(elem, "NAME"),
         type=_require(elem, "TYPE"),
         order=int(_require(elem, "ORDER")),
+        expression=elem.get("EXPRESSION"),
     )
 
 
