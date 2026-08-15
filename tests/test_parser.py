@@ -1,6 +1,6 @@
 import pytest
 
-from informatica_dbt_bridge.models import Connector
+from informatica_dbt_bridge.models import Connector, FieldDependency, Group
 from informatica_dbt_bridge.parser import PowerCenterParseError, parse_mapping
 
 SIMPLE_MAPPING_XML = """
@@ -134,3 +134,107 @@ def test_parse_mapping_selects_named_mapping_when_multiple_present() -> None:
 def test_parse_mapping_raises_when_named_mapping_not_found() -> None:
     with pytest.raises(PowerCenterParseError, match="m_NOPE"):
         parse_mapping(SIMPLE_MAPPING_XML, mapping_name="m_NOPE")
+
+
+def test_parse_mapping_ordinary_transformation_has_no_template_name() -> None:
+    mapping = parse_mapping(SIMPLE_MAPPING_XML)
+
+    fil = mapping.transformation("FIL_ACTIVE")
+
+    assert fil.template_name is None
+
+
+def test_parse_mapping_ordinary_transformation_ports_have_no_group() -> None:
+    mapping = parse_mapping(SIMPLE_MAPPING_XML)
+
+    fil = mapping.transformation("FIL_ACTIVE")
+
+    assert all(p.group is None for p in fil.ports)
+
+
+# A trimmed-down, 2-group version of the real demo export's UN_REGIONS
+# (a Custom Transformation shaped like a Union: TEMPLATENAME="Union
+# Transformation", GROUP children, TRANSFORMFIELD GROUP attributes, and
+# FIELDDEPENDENCY children mapping each input field to its output field).
+UNION_SHAPED_MAPPING_XML = """
+<POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
+  <REPOSITORY NAME="REPO" VERSION="1">
+    <FOLDER NAME="MyFolder">
+
+      <SOURCE NAME="ORDERS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">
+        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>
+      </TARGET>
+
+      <MAPPING NAME="m_LOAD_ORDERS">
+        <TRANSFORMATION NAME="SQ_ORDERS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="ORDER_ID" PORTTYPE="OUTPUT" DATATYPE="decimal"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="UN_REGIONS" TYPE="Custom Transformation"
+                         TEMPLATEID="303001" TEMPLATENAME="Union Transformation">
+          <GROUP NAME="OUTPUT" TYPE="OUTPUT" ORDER="1"/>
+          <GROUP NAME="APAC" TYPE="INPUT" ORDER="2"/>
+          <GROUP NAME="AMER" TYPE="INPUT" ORDER="3"/>
+          <TRANSFORMFIELD NAME="LOCATION_ID" GROUP="OUTPUT" PORTTYPE="OUTPUT" DATATYPE="string"/>
+          <TRANSFORMFIELD NAME="LOCATION_ID2" GROUP="APAC" PORTTYPE="INPUT" DATATYPE="string"/>
+          <TRANSFORMFIELD NAME="LOCATION_ID3" GROUP="AMER" PORTTYPE="INPUT" DATATYPE="string"/>
+          <FIELDDEPENDENCY INPUTFIELD="LOCATION_ID2" OUTPUTFIELD="LOCATION_ID"/>
+          <FIELDDEPENDENCY INPUTFIELD="LOCATION_ID3" OUTPUTFIELD="LOCATION_ID"/>
+        </TRANSFORMATION>
+
+        <CONNECTOR FROMINSTANCE="SQ_ORDERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="UN_REGIONS" TOFIELD="LOCATION_ID2"/>
+      </MAPPING>
+
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>
+"""
+
+
+def test_parse_mapping_reads_template_name_on_custom_transformation() -> None:
+    mapping = parse_mapping(UNION_SHAPED_MAPPING_XML)
+
+    union = mapping.transformation("UN_REGIONS")
+
+    assert union.template_name == "Union Transformation"
+
+
+def test_parse_mapping_reads_groups_in_declaration_order() -> None:
+    mapping = parse_mapping(UNION_SHAPED_MAPPING_XML)
+
+    union = mapping.transformation("UN_REGIONS")
+
+    assert union.groups == [
+        Group(name="OUTPUT", type="OUTPUT", order=1),
+        Group(name="APAC", type="INPUT", order=2),
+        Group(name="AMER", type="INPUT", order=3),
+    ]
+
+
+def test_parse_mapping_reads_group_attribute_on_ports() -> None:
+    mapping = parse_mapping(UNION_SHAPED_MAPPING_XML)
+
+    union = mapping.transformation("UN_REGIONS")
+
+    groups_by_port = {p.name: p.group for p in union.ports}
+    assert groups_by_port == {
+        "LOCATION_ID": "OUTPUT",
+        "LOCATION_ID2": "APAC",
+        "LOCATION_ID3": "AMER",
+    }
+
+
+def test_parse_mapping_reads_field_dependencies() -> None:
+    mapping = parse_mapping(UNION_SHAPED_MAPPING_XML)
+
+    union = mapping.transformation("UN_REGIONS")
+
+    assert union.field_dependencies == [
+        FieldDependency(input_field="LOCATION_ID2", output_field="LOCATION_ID"),
+        FieldDependency(input_field="LOCATION_ID3", output_field="LOCATION_ID"),
+    ]
