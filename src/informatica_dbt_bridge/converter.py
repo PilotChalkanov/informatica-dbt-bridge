@@ -656,15 +656,22 @@ def _resolve_source_qualifier_sources(mapping: Mapping) -> dict[str, SourceDef]:
     """Resolve each Source Qualifier's own instance name to the specific SOURCE it reads.
 
     A `CONNECTOR` edge already exists from each `SOURCE`'s own instance name
-    (matching `SourceDef.name`) directly to the specific Source Qualifier
-    instance it feeds (one edge per field, all from the same SOURCE) -
-    `parser.py` already parses every `<CONNECTOR>` unconditionally, nothing
-    filters SOURCE-origin edges out at that layer. A Source Qualifier's
-    resolved SOURCE is only accepted if *all* of its incoming SOURCE-origin
-    edges agree on the same single SourceDef (multiple fields from one
-    source is normal; two different sources feeding one SQ's ports directly
-    is invalid PowerCenter shape - that's what Joiner is for - and never
-    guessed at here).
+    directly to the specific Source Qualifier instance it feeds (one edge
+    per field, all from the same SOURCE) - `parser.py` already parses every
+    `<CONNECTOR>` unconditionally, nothing filters SOURCE-origin edges out at
+    that layer. That instance name doesn't always match a `SourceDef.name`
+    directly, though: PowerCenter lets a mapping read one physical SOURCE
+    more than once (e.g. a self-join) under a second mapping-local instance
+    name (`RAW_PRODUCTS1`, aliasing `RAW_PRODUCTS`) - `mapping.source_aliases`
+    resolves an instance name to the real SourceDef.name it aliases, and a
+    non-aliased instance simply resolves to itself, so every
+    `Connector.from_instance` is resolved through it before matching against
+    `sources_by_name` - a strict generalization, not a special case. A
+    Source Qualifier's resolved SOURCE is only accepted if *all* of its
+    incoming SOURCE-origin edges agree on the same single SourceDef
+    (multiple fields from one source is normal; two different sources
+    feeding one SQ's ports directly is invalid PowerCenter shape - that's
+    what Joiner is for - and never guessed at here).
 
     As a fallback for mappings with exactly one SOURCE and no such
     CONNECTOR wiring at all (every synthetic/hand-built test fixture in this
@@ -689,9 +696,10 @@ def _resolve_source_qualifier_sources(mapping: Mapping) -> dict[str, SourceDef]:
     for connector in mapping.connectors:
         if connector.to_instance not in sq_names:
             continue
-        if connector.from_instance not in sources_by_name:
+        resolved_name = mapping.source_aliases.get(connector.from_instance, connector.from_instance)
+        if resolved_name not in sources_by_name:
             continue
-        candidates.setdefault(connector.to_instance, set()).add(connector.from_instance)
+        candidates.setdefault(connector.to_instance, set()).add(resolved_name)
 
     result: dict[str, SourceDef] = {}
     for sq_name in sq_names:

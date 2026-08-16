@@ -84,7 +84,36 @@ def parse_mapping(xml_text: str, mapping_name: str | None = None) -> Mapping:
             _parse_transformation(elem) for elem in mapping_elem.findall("TRANSFORMATION")
         ],
         connectors=[_parse_connector(elem) for elem in mapping_elem.findall("CONNECTOR")],
+        source_aliases=_parse_source_aliases(mapping_elem),
     )
+
+
+def _parse_source_aliases(mapping_elem: ET.Element) -> dict[str, str]:
+    """Parse every `TYPE="SOURCE"` `INSTANCE` child into a NAME -> TRANSFORMATION_NAME map.
+
+    Only `SOURCE`-type instances are relevant here (resolving a CONNECTOR's
+    `FROMINSTANCE` back to the `SourceDef` it actually reads) - `TARGET`- and
+    `TRANSFORMATION`-type `INSTANCE` elements are ignored, since nothing in
+    this codebase needs their aliasing today.
+
+    Args:
+        mapping_elem: The `<MAPPING>` element.
+
+    Returns:
+        A dict from instance NAME to TRANSFORMATION_NAME, for every
+        `TYPE="SOURCE"` `<INSTANCE>` child that has both attributes. Empty
+        if the mapping has no such instances (real exports may omit
+        `INSTANCE` entirely, or omit it for non-aliased sources).
+    """
+    aliases: dict[str, str] = {}
+    for elem in mapping_elem.findall("INSTANCE"):
+        if elem.get("TYPE") != "SOURCE":
+            continue
+        instance_name = elem.get("NAME")
+        transformation_name = elem.get("TRANSFORMATION_NAME")
+        if instance_name and transformation_name:
+            aliases[instance_name] = transformation_name
+    return aliases
 
 
 def _parse_source(elem: ET.Element) -> SourceDef:

@@ -255,6 +255,95 @@ def test_convert_mapping_raises_when_source_qualifier_fed_by_two_different_sourc
         convert_mapping(xml, source_system="erp")
 
 
+# Mirrors the real demo export's RAW_PRODUCTS/RAW_PRODUCTS1 shape: SQ_PRODUCTS
+# reads the SOURCE directly, SQ_PRODUCTS1 reads it through a mapping-local
+# INSTANCE alias (a self-join pattern) - both must resolve to the same
+# underlying SOURCE. A second, unrelated SOURCE is included specifically so
+# the "only one SOURCE exists" fallback can't accidentally paper over broken
+# alias resolution - both SQs must resolve via real CONNECTOR/INSTANCE data.
+ALIASED_SOURCE_MAPPING_XML = """
+<POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
+  <REPOSITORY NAME="REPO" VERSION="1">
+    <FOLDER NAME="MyFolder">
+
+      <SOURCE NAME="PRODUCTS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="SKU" DATATYPE="string" PRECISION="50" SCALE="0"/>
+      </SOURCE>
+
+      <SOURCE NAME="UNRELATED" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <TARGET NAME="TGT_PRODUCTS" DATABASETYPE="Oracle">
+        <TARGETFIELD NAME="SKU" DATATYPE="varchar"/>
+      </TARGET>
+
+      <MAPPING NAME="m_LOAD_PRODUCTS_SELF_JOIN">
+        <TRANSFORMATION NAME="SQ_PRODUCTS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="SKU" PORTTYPE="OUTPUT" DATATYPE="string"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="SQ_PRODUCTS1" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="SKU" PORTTYPE="OUTPUT" DATATYPE="string"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="JNR_PRODUCTS" TYPE="Joiner">
+          <TRANSFORMFIELD NAME="SKU" PORTTYPE="INPUT/OUTPUT" DATATYPE="string"/>
+          <TRANSFORMFIELD NAME="SKU1" PORTTYPE="INPUT/OUTPUT/MASTER" DATATYPE="string"/>
+          <TABLEATTRIBUTE NAME="Join Condition" VALUE="SKU1 = SKU"/>
+          <TABLEATTRIBUTE NAME="Join Type" VALUE="Normal Join"/>
+        </TRANSFORMATION>
+
+        <INSTANCE NAME="PRODUCTS" TRANSFORMATION_NAME="PRODUCTS"
+                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>
+        <INSTANCE NAME="PRODUCTS1" TRANSFORMATION_NAME="PRODUCTS"
+                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>
+
+        <CONNECTOR FROMINSTANCE="PRODUCTS" FROMFIELD="SKU"
+                    TOINSTANCE="SQ_PRODUCTS" TOFIELD="SKU"/>
+        <CONNECTOR FROMINSTANCE="PRODUCTS1" FROMFIELD="SKU"
+                    TOINSTANCE="SQ_PRODUCTS1" TOFIELD="SKU"/>
+        <CONNECTOR FROMINSTANCE="SQ_PRODUCTS1" FROMFIELD="SKU"
+                    TOINSTANCE="JNR_PRODUCTS" TOFIELD="SKU1"/>
+        <CONNECTOR FROMINSTANCE="SQ_PRODUCTS" FROMFIELD="SKU"
+                    TOINSTANCE="JNR_PRODUCTS" TOFIELD="SKU"/>
+      </MAPPING>
+
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>
+"""
+
+
+def test_convert_mapping_resolves_source_qualifier_through_instance_alias() -> None:
+    result = convert_mapping(ALIASED_SOURCE_MAPPING_XML, source_system="erp")
+
+    assert result.mapping_name == "m_LOAD_PRODUCTS_SELF_JOIN"
+    assert (
+        "sq_products as (\n\n    select sku\n    from {{ source('erp', 'products') }}" in result.sql
+    )
+    assert (
+        "sq_products1 as (\n\n    select sku\n    from {{ source('erp', 'products') }}"
+        in result.sql
+    )
+    assert result.notes == []
+
+
+def test_convert_mapping_raises_when_aliased_source_qualifier_unresolvable() -> None:
+    # PRODUCTS1's own INSTANCE alias is missing entirely, and "PRODUCTS1"
+    # doesn't match any real SourceDef.name directly either. The fixture
+    # already has 2 SOURCEs, so the "only one SOURCE, so it must be this
+    # one" fallback can't rescue it.
+    xml = ALIASED_SOURCE_MAPPING_XML.replace(
+        '<INSTANCE NAME="PRODUCTS1" TRANSFORMATION_NAME="PRODUCTS"\n'
+        '                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>',
+        "",
+    )
+
+    with pytest.raises(ValueError, match="SQ_PRODUCTS1"):
+        convert_mapping(xml, source_system="erp")
+
+
 def test_convert_mapping_raises_on_fan_in_from_two_upstream_transformations() -> None:
     xml = GOLDEN_MAPPING_XML.replace(
         "</MAPPING>",
