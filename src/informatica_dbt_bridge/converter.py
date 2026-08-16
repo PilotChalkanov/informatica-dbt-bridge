@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 
 from informatica_dbt_bridge.cte import Cte, TranslationNote
 from informatica_dbt_bridge.dag import topological_order
-from informatica_dbt_bridge.models import Connector, Mapping, SourceDef, TransformationNode
+from informatica_dbt_bridge.models import (
+    Connector,
+    Mapping,
+    SourceDef,
+    TargetDef,
+    TransformationNode,
+)
 from informatica_dbt_bridge.naming import snake_case
 from informatica_dbt_bridge.parser import parse_mapping
 from informatica_dbt_bridge.render import render_model
@@ -39,6 +45,8 @@ class ConversionResult:
 
     mapping_name: str
     sql: str
+    target_name: str  # the mapping's TARGET's raw name, e.g. "TGT_ORDERS" - not snake_cased;
+    # callers that need a filesystem-safe name (e.g. the CLI) apply naming.snake_case themselves
     notes: list[TranslationNote] = field(default_factory=list)
 
 
@@ -115,12 +123,16 @@ def convert_mapping(
         for cte in translated:
             notes.extend(cte.notes)
 
-    if not mapping.targets:
-        raise ValueError(f"mapping {mapping.name!r} has no TARGET")
-    final_columns = [snake_case(f.name) for f in mapping.targets[0].fields]
+    target, target_notes = _resolve_mapping_target(mapping)
+    final_columns = [snake_case(f.name) for f in target.fields]
 
     sql = render_model(ctes, final_columns=final_columns)
-    return ConversionResult(mapping_name=mapping.name, sql=sql, notes=notes)
+    return ConversionResult(
+        mapping_name=mapping.name,
+        sql=sql,
+        target_name=target.name,
+        notes=notes + target_notes,
+    )
 
 
 def _translate_node(
@@ -709,3 +721,85 @@ def _resolve_source_qualifier_sources(mapping: Mapping) -> dict[str, SourceDef]:
         elif not names and len(mapping.sources) == 1:
             result[sq_name] = mapping.sources[0]
     return result
+
+
+def _resolve_mapping_target(mapping: Mapping) -> tuple[TargetDef, list[TranslationNote]]:
+    """Resolve which of the folder's (possibly many) TARGETs this specific mapping loads.
+
+    SOURCE/TARGET are folder-level repository objects, reusable across every
+    mapping in the folder - `mapping.targets` is the whole folder's TARGET
+    list, not scoped to this one mapping. The mapping's own CONNECTOR edges
+    (which *are* mapping-scoped) are the source of truth for which TARGET(s)
+    it actually terminates at - the same category of problem
+    `_resolve_source_qualifier_sources` solves for SOURCE, applied to the
+    other end of the pipeline.
+
+    Unlike a Source Qualifier reading two different SOURCEs directly (a
+    genuine PowerCenter authoring error - that's what Joiner is for), a
+    single mapping loading *several* different TARGETs is a normal,
+    common PowerCenter pattern (e.g. one staging mapping populating many
+    staging tables) - confirmed directly against the real demo export,
+    where every one of its three mappings does this. This tool currently
+    renders one final `select` (and so, in the CLI, one `.sql` file) per
+    mapping, so it can't fully represent that yet: rather than guess which
+    target's shape is "the" output (or hard-fail every legitimate
+    multi-target mapping, which would make the real demo file
+    unconvertible), this deterministically picks the alphabetically-first
+    matched TARGET to drive the final column list/output filename, and
+    flags the rest via a `TranslationNote` naming every target found - full
+    N-target output is a genuine, separate follow-up, not attempted here.
+
+    As a fallback for a folder with exactly one TARGET and no CONNECTOR
+    wiring onto it at all (every synthetic/hand-built test fixture in this
+    project predates this resolution and never wires a TARGET via
+    CONNECTOR), a mapping with zero TARGET-origin candidates defaults to
+    that one TARGET, since it's the only one it could possibly be.
+
+    Args:
+        mapping: The mapping to resolve a TARGET for.
+
+    Returns:
+        The mapping's resolved TargetDef, and a TranslationNote (as a
+        one-element list) if more than one TARGET was found - otherwise an
+        empty list.
+
+    Raises:
+        ValueError: The mapping's folder has no TARGET at all, or (with more
+            than one TARGET in the folder) none of this mapping's own
+            CONNECTOR edges land on any of them - no signal to resolve from
+            at all, never guessed.
+    """
+    if not mapping.targets:
+        raise ValueError(f"mapping {mapping.name!r} has no TARGET")
+    targets_by_name = {t.name: t for t in mapping.targets}
+
+    matched = sorted(
+        {
+            connector.to_instance
+            for connector in mapping.connectors
+            if connector.to_instance in targets_by_name
+        }
+    )
+    if matched:
+        chosen = targets_by_name[matched[0]]
+        if len(matched) == 1:
+            return chosen, []
+        note = TranslationNote(
+            transformation=mapping.name,
+            message=(
+                f"mapping loads {len(matched)} TARGETs ({', '.join(matched)}), but this "
+                f"tool currently emits a single dbt model per mapping - only "
+                f"{chosen.name!r}'s shape was used for the final SELECT and output file "
+                "name; the other targets' upstream logic still exists in the generated "
+                "CTEs but isn't reflected in the final column list. Needs manual review "
+                "(likely splitting into one model per target)."
+            ),
+        )
+        return chosen, [note]
+    if len(mapping.targets) == 1:
+        return mapping.targets[0], []
+    raise ValueError(
+        f"mapping {mapping.name!r} has {len(mapping.targets)} TARGET(s) in its folder "
+        "and none of its own CONNECTOR edges land on any of them; cannot determine "
+        "which TARGET it loads"
+    )

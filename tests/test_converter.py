@@ -100,6 +100,94 @@ def test_convert_mapping_produces_expected_sql_for_sq_filter_expression_chain() 
     assert result.mapping_name == "m_LOAD_ORDERS"
     assert result.sql == EXPECTED_SQL
     assert result.notes == []
+    assert result.target_name == "TGT_ORDERS"
+
+
+def test_convert_mapping_resolves_target_via_connector_in_multi_target_folder() -> None:
+    # SOURCE/TARGET are folder-level repository objects, reusable across
+    # every mapping in the folder - `mapping.targets` is the *whole folder's*
+    # TARGET list, not scoped to this one mapping. A second, unrelated
+    # TARGET is declared *before* TGT_ORDERS in file order specifically so a
+    # naive "just take targets[0]" implementation would get this wrong -
+    # only this mapping's own CONNECTOR edges (mapping-scoped) can say which
+    # TARGET it actually loads.
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+        '<TARGET NAME="TGT_OTHER_MAPPING" DATABASETYPE="Oracle">\n'
+        '        <TARGETFIELD NAME="SOMETHING" DATATYPE="varchar"/>\n'
+        "      </TARGET>\n\n"
+        '      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+    ).replace(
+        "</MAPPING>",
+        '<CONNECTOR FROMINSTANCE="EXP_CALC" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="TGT_ORDERS" TOFIELD="ORDER_ID"/>\n'
+        "      </MAPPING>",
+    )
+
+    result = convert_mapping(xml, source_system="erp")
+
+    assert result.target_name == "TGT_ORDERS"
+
+
+def test_convert_mapping_flags_note_and_picks_deterministic_target_when_multi_target() -> None:
+    # This mapping's own CONNECTOR edges terminate at *two different*
+    # TARGETs - a normal PowerCenter pattern (one mapping loading several
+    # tables), confirmed directly against the real demo export, where every
+    # one of its three mappings does this. Never guessed at silently: picks
+    # the alphabetically-first match deterministically and flags the rest.
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+        '<TARGET NAME="TGT_OTHER" DATABASETYPE="Oracle">\n'
+        '        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>\n'
+        "      </TARGET>\n\n"
+        '      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+    ).replace(
+        "</MAPPING>",
+        '<CONNECTOR FROMINSTANCE="EXP_CALC" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="TGT_ORDERS" TOFIELD="ORDER_ID"/>\n'
+        '        <CONNECTOR FROMINSTANCE="EXP_CALC" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="TGT_OTHER" TOFIELD="ORDER_ID"/>\n'
+        "      </MAPPING>",
+    )
+
+    result = convert_mapping(xml, source_system="erp")
+
+    # "TGT_ORDERS" < "TGT_OTHER" alphabetically, so it's the deterministic pick.
+    assert result.target_name == "TGT_ORDERS"
+    assert len(result.notes) == 1
+    assert result.notes[0].transformation == "m_LOAD_ORDERS"
+    assert "TGT_ORDERS" in result.notes[0].message
+    assert "TGT_OTHER" in result.notes[0].message
+    assert "2 TARGETs" in result.notes[0].message
+
+
+def test_convert_mapping_raises_when_target_wholly_unresolvable() -> None:
+    # Multiple TARGETs in the folder, but *none* of this mapping's own
+    # CONNECTOR edges land on any of them - no signal at all to pick from.
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+        '<TARGET NAME="TGT_OTHER" DATABASETYPE="Oracle">\n'
+        '        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>\n'
+        "      </TARGET>\n\n"
+        '      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+    )
+
+    with pytest.raises(ValueError, match="m_LOAD_ORDERS"):
+        convert_mapping(xml, source_system="erp")
+
+
+def test_convert_mapping_raises_when_mapping_has_no_target_at_all() -> None:
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">\n'
+        '        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>\n'
+        '        <TARGETFIELD NAME="STATUS" DATATYPE="varchar"/>\n'
+        '        <TARGETFIELD NAME="IS_LARGE" DATATYPE="varchar"/>\n'
+        "      </TARGET>",
+        "",
+    )
+
+    with pytest.raises(ValueError, match="no TARGET"):
+        convert_mapping(xml, source_system="erp")
 
 
 def test_convert_mapping_flags_unsupported_transformation_type_with_todo() -> None:

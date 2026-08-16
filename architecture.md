@@ -236,6 +236,19 @@ library function is already repo-batchable by calling it once per mapping file).
   Wiring it into real scheduling (dbt Cloud jobs, Airflow selectors,
   `config(tags=[...])`) is left to a human, consistent with the skill file's stance
   that orchestration isn't transformation logic.
+- **A mapping can genuinely load more than one `TARGET`** (confirmed directly against
+  the real demo export — all three of its mappings do this, e.g. one staging mapping
+  populating six separate staging tables). `SOURCE`/`TARGET` are folder-level
+  repository objects reusable across every mapping in the folder, so `convert_mapping`
+  resolves *this* mapping's actual target(s) via its own `CONNECTOR` edges (mirroring
+  how a Source Qualifier's `SOURCE` is resolved) rather than blindly taking the
+  folder's first `TARGET`. But this tool still renders one final `select` (and, via the
+  CLI, one `.sql` file) per mapping: when a mapping resolves to several targets, it
+  deterministically picks the alphabetically-first one to drive the final column list
+  and output filename, and flags the rest with a `TranslationNote` naming every target
+  found — a real gap, not silently papered over, but not yet fixed. Follow-up: emit one
+  model per target (would need `render_model`/`ConversionResult`/the CLI to support an
+  N-output mapping, not just 1:1).
 
 ## Implementation plan (next step)
 
