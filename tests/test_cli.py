@@ -239,7 +239,7 @@ def test_main_invokes_run_and_exits_with_its_code(
     monkeypatch.setattr(
         "sys.argv",
         [
-            "informatica-dbt-bridge",
+            "idbb",
             "convert",
             str(xml_path),
             "--out",

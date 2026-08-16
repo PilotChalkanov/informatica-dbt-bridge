@@ -80,13 +80,13 @@ def run(argv: list[str]) -> int:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    """Build the top-level `informatica-dbt-bridge` argument parser.
+    """Build the top-level `idbb` argument parser.
 
     Returns:
         The configured `ArgumentParser`, with `convert` as its one
         subcommand.
     """
-    parser = argparse.ArgumentParser(prog="informatica-dbt-bridge")
+    parser = argparse.ArgumentParser(prog="idbb")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     convert = subparsers.add_parser(

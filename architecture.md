@@ -132,7 +132,7 @@ would indicate a malformed export) for free, and needs no new dependency.
   notes, mapping variables, and every manual-review item collected from the
   translators and expression translator along the way.
 
-- **CLI** (`cli.py`) — `informatica-dbt-bridge convert <xml> --out <dbt_project_dir>`.
+- **CLI** (`cli.py`) — `idbb convert <xml> --out <dbt_project_dir>`.
   Thin: parses args, calls the library function below, writes the returned files to
   disk. All translation logic is filesystem-free and unit-testable without it.
 
@@ -173,14 +173,14 @@ produces byte-identical output.
 
 ### Interfaces
 
-- **CLI**: `informatica-dbt-bridge convert <xml-path> --out <dbt-project-root>`.
+- **CLI**: `idbb convert <xml-path> --out <dbt-project-root>`.
   Exit non-zero with a clear message on unparseable/unsupported input; never exit 0
   having silently dropped transformation logic.
 - **Library API**: `convert_mapping(...)` above — the contract the tests target.
 
 ### Deployment topology
 
-Local CLI tool, run via `uv run informatica-dbt-bridge convert ...`. No server, no
+Local CLI tool, run via `uv run idbb convert ...`. No server, no
 persistent process. A plausible future home is a one-off CI/pre-commit step for
 bulk-migrating an exported Informatica repo folder, but that's out of scope now —
 noted so the single-file-first design doesn't accidentally foreclose it (the
