@@ -76,23 +76,25 @@ def convert_mapping(
         ValueError: The mapping has no SOURCE, no TARGET, a transformation
             with no upstream feeding it, a Joiner whose master/detail split
             couldn't be resolved, a Union whose INPUT groups couldn't be
-            cleanly matched one-to-one with upstream transformations, or a
+            cleanly matched one-to-one with upstream transformations, a
             transformation downstream of a Router whose specific branch
-            couldn't be resolved.
-        NotImplementedError: The mapping has more than one SOURCE (per-SQ
-            multi-source resolution is a known, separately-scoped follow-up
-            - see the project report), or a transformation has fan-in from
-            more than one upstream and isn't a Joiner with a resolvable
-            master/detail split or a Union with a resolvable group split.
+            couldn't be resolved, or a Source Qualifier whose SOURCE
+            couldn't be resolved (ambiguous or missing CONNECTOR wiring in a
+            multi-SOURCE mapping).
+        NotImplementedError: A transformation has fan-in from more than one
+            upstream and isn't a Joiner with a resolvable master/detail
+            split or a Union with a resolvable group split.
     """
     mapping = parse_mapping(xml_text, mapping_name=mapping_name)
+    if not mapping.sources:
+        raise ValueError(f"mapping {mapping.name!r} has no SOURCE")
     order = topological_order(mapping)
     upstream_of = _build_upstream_map(mapping)
     joiner_upstreams = _build_joiner_upstream_map(mapping)
     union_upstreams = _build_union_upstream_map(mapping)
     router_downstream_cte = _resolve_router_downstream_ctes(mapping)
     router_names = {t.name for t in mapping.transformations if t.type == "Router"}
-    source = _resolve_single_source(mapping)
+    source_qualifier_sources = _resolve_source_qualifier_sources(mapping)
 
     ctes: list[Cte] = []
     notes: list[TranslationNote] = []
@@ -104,7 +106,7 @@ def convert_mapping(
         translated = _translate_node(
             node,
             upstream_cte,
-            source,
+            source_qualifier_sources,
             source_system,
             joiner_upstreams.get(name),
             union_upstreams.get(name),
@@ -124,7 +126,7 @@ def convert_mapping(
 def _translate_node(
     node: TransformationNode,
     upstream_cte: str | None,
-    source: SourceDef,
+    source_qualifier_sources: dict[str, SourceDef],
     source_system: str,
     joiner_upstream: _JoinerUpstream | None,
     union_upstream: dict[str, str] | None,
@@ -144,8 +146,9 @@ def _translate_node(
             `node` has no single upstream (only valid for a Source
             Qualifier, or a Joiner/Union - which use
             `joiner_upstream`/`union_upstream` instead).
-        source: The mapping's resolved SOURCE, used when `node` is a Source
-            Qualifier.
+        source_qualifier_sources: Every Source Qualifier's resolved SOURCE
+            (see `_resolve_source_qualifier_sources`), used when `node` is a
+            Source Qualifier.
         source_system: The dbt `source()` name to pass through to a Source
             Qualifier translation.
         joiner_upstream: `node`'s resolved master/detail upstream
@@ -168,9 +171,17 @@ def _translate_node(
             attribute (there's no reliable way to resolve which table it
             joins against otherwise - see `translators/lookup.py`),
             `node.type` is `"Joiner"` with no resolvable `joiner_upstream`,
-            or `node` is a Union with no resolvable `union_upstream`.
+            `node` is a Union with no resolvable `union_upstream`, or `node`
+            is a Source Qualifier with no resolvable SOURCE.
     """
     if node.type == "Source Qualifier":
+        source = source_qualifier_sources.get(node.name)
+        if source is None:
+            raise ValueError(
+                f"{node.name!r} (Source Qualifier) has no resolvable SOURCE; needs a "
+                "CONNECTOR edge from exactly one SOURCE instance (or the mapping must "
+                "have exactly one SOURCE overall)"
+            )
         return [
             translate_source_qualifier(
                 node, source_system=source_system, source_table=source.name.lower()
@@ -641,29 +652,52 @@ def _resolve_router_downstream_ctes(mapping: Mapping) -> dict[str, str]:
     return result
 
 
-def _resolve_single_source(mapping: Mapping) -> SourceDef:
-    """Return the mapping's one SOURCE.
+def _resolve_source_qualifier_sources(mapping: Mapping) -> dict[str, SourceDef]:
+    """Resolve each Source Qualifier's own instance name to the specific SOURCE it reads.
+
+    A `CONNECTOR` edge already exists from each `SOURCE`'s own instance name
+    (matching `SourceDef.name`) directly to the specific Source Qualifier
+    instance it feeds (one edge per field, all from the same SOURCE) -
+    `parser.py` already parses every `<CONNECTOR>` unconditionally, nothing
+    filters SOURCE-origin edges out at that layer. A Source Qualifier's
+    resolved SOURCE is only accepted if *all* of its incoming SOURCE-origin
+    edges agree on the same single SourceDef (multiple fields from one
+    source is normal; two different sources feeding one SQ's ports directly
+    is invalid PowerCenter shape - that's what Joiner is for - and never
+    guessed at here).
+
+    As a fallback for mappings with exactly one SOURCE and no such
+    CONNECTOR wiring at all (every synthetic/hand-built test fixture in this
+    project predates this resolution and has no SOURCE->SQ edges), a Source
+    Qualifier with zero SOURCE-origin candidates defaults to that one
+    SOURCE, since it's the only one it could possibly be - not a guess, an
+    unambiguous single candidate.
 
     Args:
-        mapping: The mapping to resolve a source for.
+        mapping: The mapping to resolve Source Qualifier sources for.
 
     Returns:
-        The mapping's single SourceDef.
-
-    Raises:
-        ValueError: The mapping has no SOURCE.
-        NotImplementedError: The mapping has more than one SOURCE - resolving
-            which SOURCE feeds which Source Qualifier needs per-instance
-            INSTANCE/CONNECTOR resolution this parser doesn't do yet (a
-            separate, deliberately deferred follow-up - not a Joiner
-            limitation; Joiner itself is supported).
+        A dict from Source Qualifier instance name to its resolved
+        SourceDef. A Source Qualifier with an ambiguous or unresolvable
+        SOURCE (and more than one SOURCE in the mapping) is simply absent
+        here - `_translate_node` raises a clear error for that case.
     """
-    if not mapping.sources:
-        raise ValueError(f"mapping {mapping.name!r} has no SOURCE")
-    if len(mapping.sources) > 1:
-        raise NotImplementedError(
-            f"mapping {mapping.name!r} has multiple sources "
-            f"{[s.name for s in mapping.sources]}; per-Source-Qualifier source "
-            "resolution isn't supported yet"
-        )
-    return mapping.sources[0]
+    sources_by_name = {s.name: s for s in mapping.sources}
+    sq_names = {t.name for t in mapping.transformations if t.type == "Source Qualifier"}
+
+    candidates: dict[str, set[str]] = {}
+    for connector in mapping.connectors:
+        if connector.to_instance not in sq_names:
+            continue
+        if connector.from_instance not in sources_by_name:
+            continue
+        candidates.setdefault(connector.to_instance, set()).add(connector.from_instance)
+
+    result: dict[str, SourceDef] = {}
+    for sq_name in sq_names:
+        names = candidates.get(sq_name, set())
+        if len(names) == 1:
+            result[sq_name] = sources_by_name[next(iter(names))]
+        elif not names and len(mapping.sources) == 1:
+            result[sq_name] = mapping.sources[0]
+    return result

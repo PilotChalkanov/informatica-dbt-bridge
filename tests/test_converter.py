@@ -128,14 +128,130 @@ def test_convert_mapping_raises_on_transformation_with_no_upstream() -> None:
         convert_mapping(xml, source_system="erp")
 
 
-def test_convert_mapping_raises_on_multiple_sources() -> None:
+def test_convert_mapping_raises_when_sq_unresolvable_among_multiple_sources() -> None:
+    # A second SOURCE now exists, but nothing connects it (or anything) to
+    # SQ_ORDERS via a SOURCE->SourceQualifier CONNECTOR edge, and the mapping
+    # has more than one SOURCE - so the "only one SOURCE exists, so it must
+    # be this one" fallback doesn't apply either. Genuinely unresolvable,
+    # unlike a mapping with 2+ SOURCEs that are each properly wired (see
+    # `test_convert_mapping_resolves_each_source_qualifier_to_its_own_source`
+    # below) - multiple SOURCEs are supported now, this is a distinct,
+    # still-real ambiguity case.
     xml = GOLDEN_MAPPING_XML.replace(
         "</SOURCE>",
         '</SOURCE><SOURCE NAME="CUSTOMERS" DATABASETYPE="Oracle"></SOURCE>',
         1,
     )
 
-    with pytest.raises(NotImplementedError, match="multiple sources"):
+    with pytest.raises(ValueError, match="SQ_ORDERS"):
+        convert_mapping(xml, source_system="erp")
+
+
+def test_convert_mapping_raises_when_mapping_has_no_source_at_all() -> None:
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<SOURCE NAME="ORDERS" DATABASETYPE="Oracle">\n'
+        '        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"\n'
+        '                      KEYTYPE="PRIMARY KEY" NULLABLE="NOTNULL"/>\n'
+        '        <SOURCEFIELD NAME="STATUS" DATATYPE="string" PRECISION="20" NULLABLE="NULL"/>\n'
+        '        <SOURCEFIELD NAME="AMOUNT" DATATYPE="decimal" PRECISION="15" SCALE="2"/>\n'
+        "      </SOURCE>",
+        "",
+    )
+
+    with pytest.raises(ValueError, match="no SOURCE"):
+        convert_mapping(xml, source_system="erp")
+
+
+TWO_SOURCE_MAPPING_XML = """
+<POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
+  <REPOSITORY NAME="REPO" VERSION="1">
+    <FOLDER NAME="MyFolder">
+
+      <SOURCE NAME="ORDERS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <SOURCE NAME="CUSTOMERS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">
+        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>
+      </TARGET>
+
+      <MAPPING NAME="m_LOAD_ORDERS_TWO_SOURCES">
+        <TRANSFORMATION NAME="SQ_ORDERS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="ORDER_ID" PORTTYPE="OUTPUT" DATATYPE="decimal"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="SQ_CUSTOMERS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="ORDER_ID" PORTTYPE="OUTPUT" DATATYPE="decimal"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="JNR_ORDERS" TYPE="Joiner">
+          <TRANSFORMFIELD NAME="ORDER_ID" PORTTYPE="INPUT/OUTPUT" DATATYPE="decimal"/>
+          <TRANSFORMFIELD NAME="ORDER_ID1" PORTTYPE="INPUT/OUTPUT/MASTER" DATATYPE="decimal"/>
+          <TABLEATTRIBUTE NAME="Join Condition" VALUE="ORDER_ID1 = ORDER_ID"/>
+          <TABLEATTRIBUTE NAME="Join Type" VALUE="Normal Join"/>
+        </TRANSFORMATION>
+
+        <CONNECTOR FROMINSTANCE="ORDERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="SQ_ORDERS" TOFIELD="ORDER_ID"/>
+        <CONNECTOR FROMINSTANCE="CUSTOMERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="SQ_CUSTOMERS" TOFIELD="ORDER_ID"/>
+        <CONNECTOR FROMINSTANCE="SQ_ORDERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="JNR_ORDERS" TOFIELD="ORDER_ID1"/>
+        <CONNECTOR FROMINSTANCE="SQ_CUSTOMERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="JNR_ORDERS" TOFIELD="ORDER_ID"/>
+      </MAPPING>
+
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>
+"""
+
+
+def test_convert_mapping_resolves_each_source_qualifier_to_its_own_source() -> None:
+    result = convert_mapping(TWO_SOURCE_MAPPING_XML, source_system="erp")
+
+    assert result.mapping_name == "m_LOAD_ORDERS_TWO_SOURCES"
+    assert "sq_orders as (\n\n    select order_id\n    from {{ source('erp', 'orders') }}" in (
+        result.sql
+    )
+    assert (
+        "sq_customers as (\n\n    select order_id\n    from {{ source('erp', 'customers') }}"
+        in result.sql
+    )
+    assert result.notes == []
+
+
+def test_convert_mapping_raises_when_source_qualifier_source_unresolvable() -> None:
+    # SQ_ORDERS now has no CONNECTOR from any SOURCE at all, and the mapping
+    # has two SOURCEs - genuinely unresolvable, not a case where "only one
+    # SOURCE exists" can save it.
+    xml = TWO_SOURCE_MAPPING_XML.replace(
+        '<CONNECTOR FROMINSTANCE="ORDERS" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="SQ_ORDERS" TOFIELD="ORDER_ID"/>',
+        "",
+    )
+
+    with pytest.raises(ValueError, match="SQ_ORDERS"):
+        convert_mapping(xml, source_system="erp")
+
+
+def test_convert_mapping_raises_when_source_qualifier_fed_by_two_different_sources() -> None:
+    # SQ_ORDERS now has CONNECTOR edges from *both* SOURCEs directly - an
+    # invalid shape (that's what Joiner is for), must not silently pick one.
+    xml = TWO_SOURCE_MAPPING_XML.replace(
+        '<CONNECTOR FROMINSTANCE="CUSTOMERS" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="SQ_CUSTOMERS" TOFIELD="ORDER_ID"/>',
+        '<CONNECTOR FROMINSTANCE="CUSTOMERS" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="SQ_CUSTOMERS" TOFIELD="ORDER_ID"/>\n'
+        '        <CONNECTOR FROMINSTANCE="CUSTOMERS" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="SQ_ORDERS" TOFIELD="ORDER_ID"/>',
+    )
+
+    with pytest.raises(ValueError, match="SQ_ORDERS"):
         convert_mapping(xml, source_system="erp")
 
 
@@ -218,10 +334,10 @@ def test_convert_mapping_raises_on_lookup_with_no_upstream() -> None:
 
 
 # Both Source Qualifiers read the same single SOURCE (a valid, if unusual,
-# "join a source against itself" pattern) - deliberately, so this fixture
-# doesn't trip `_resolve_single_source`'s still-in-place multi-SOURCE
-# restriction (see the project report on why that fix was deferred this
-# round) while still exercising a real two-upstream Joiner end to end.
+# "join a source against itself" pattern) - kept from when multi-SOURCE
+# mappings weren't supported yet; still a perfectly valid fixture shape for
+# testing Joiner specifically, so left as-is rather than churned for its own
+# sake (see TWO_SOURCE_MAPPING_XML below for a real multi-SOURCE fixture).
 JOINER_MAPPING_XML = """
 <POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
   <REPOSITORY NAME="REPO" VERSION="1">
@@ -325,10 +441,9 @@ def test_convert_mapping_joiner_resolution_ignores_unrelated_connectors() -> Non
 
 
 # All three Source Qualifiers read the same single SOURCE (same "join/union a
-# source against itself" pattern used for JOINER_MAPPING_XML, for the same
-# reason - avoids tripping `_resolve_single_source`'s still-in-place
-# multi-SOURCE restriction while still exercising a real N-ary-fan-in Union
-# end to end).
+# source against itself" pattern used for JOINER_MAPPING_XML, kept for the
+# same reason - still valid, not churned just because multi-SOURCE mappings
+# are supported now too).
 UNION_MAPPING_XML = """
 <POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
   <REPOSITORY NAME="REPO" VERSION="1">
