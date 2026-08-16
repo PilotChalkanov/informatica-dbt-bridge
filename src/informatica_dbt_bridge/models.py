@@ -134,6 +134,14 @@ class Mapping:
     targets: list[TargetDef]
     transformations: list[TransformationNode]
     connectors: list[Connector]
+    # A `TYPE="SOURCE"` `INSTANCE`'s own NAME -> its TRANSFORMATION_NAME (the
+    # real underlying SourceDef.name it aliases). PowerCenter uses this to let
+    # one mapping read the same physical SOURCE more than once (e.g. a
+    # self-join) under distinct mapping-local instance names - CONNECTOR
+    # edges reference the INSTANCE name, not necessarily the SourceDef name.
+    # A non-aliased instance has NAME == TRANSFORMATION_NAME, so resolving
+    # through this map is always safe, never a special case.
+    source_aliases: dict[str, str] = field(default_factory=dict)
 
     def transformation(self, name: str) -> TransformationNode:
         """Look up a transformation by its instance name.

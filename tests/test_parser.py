@@ -318,3 +318,86 @@ def test_parse_mapping_ordinary_port_has_no_ref_field() -> None:
     fil = mapping.transformation("FIL_ACTIVE")
 
     assert all(p.ref_field is None for p in fil.ports)
+
+
+def test_parse_mapping_without_instance_elements_has_empty_source_aliases() -> None:
+    mapping = parse_mapping(SIMPLE_MAPPING_XML)
+
+    assert mapping.source_aliases == {}
+
+
+# Mirrors the real demo export's RAW_PRODUCTS/RAW_PRODUCTS1 shape: a second
+# mapping-local INSTANCE alias of the same physical SOURCE, used to read it
+# twice in one mapping (e.g. a self-join), plus a non-aliased INSTANCE where
+# NAME and TRANSFORMATION_NAME coincide (the common case).
+INSTANCE_ALIAS_MAPPING_XML = """
+<POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
+  <REPOSITORY NAME="REPO" VERSION="1">
+    <FOLDER NAME="MyFolder">
+
+      <SOURCE NAME="PRODUCTS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="SKU" DATATYPE="string" PRECISION="50" SCALE="0"/>
+      </SOURCE>
+
+      <TARGET NAME="TGT_PRODUCTS" DATABASETYPE="Oracle">
+        <TARGETFIELD NAME="SKU" DATATYPE="varchar"/>
+      </TARGET>
+
+      <MAPPING NAME="m_LOAD_PRODUCTS">
+        <TRANSFORMATION NAME="SQ_PRODUCTS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="SKU" PORTTYPE="OUTPUT" DATATYPE="string"/>
+        </TRANSFORMATION>
+        <TRANSFORMATION NAME="SQ_PRODUCTS1" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="SKU" PORTTYPE="OUTPUT" DATATYPE="string"/>
+        </TRANSFORMATION>
+
+        <INSTANCE NAME="PRODUCTS" TRANSFORMATION_NAME="PRODUCTS"
+                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>
+        <INSTANCE NAME="PRODUCTS1" TRANSFORMATION_NAME="PRODUCTS"
+                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>
+
+        <CONNECTOR FROMINSTANCE="PRODUCTS" FROMFIELD="SKU"
+                    TOINSTANCE="SQ_PRODUCTS" TOFIELD="SKU"/>
+        <CONNECTOR FROMINSTANCE="PRODUCTS1" FROMFIELD="SKU"
+                    TOINSTANCE="SQ_PRODUCTS1" TOFIELD="SKU"/>
+      </MAPPING>
+
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>
+"""
+
+
+def test_parse_mapping_reads_source_type_instance_aliases() -> None:
+    mapping = parse_mapping(INSTANCE_ALIAS_MAPPING_XML)
+
+    assert mapping.source_aliases == {"PRODUCTS": "PRODUCTS", "PRODUCTS1": "PRODUCTS"}
+
+
+def test_parse_mapping_ignores_non_source_instance_elements() -> None:
+    xml = INSTANCE_ALIAS_MAPPING_XML.replace(
+        '<INSTANCE NAME="PRODUCTS1" TRANSFORMATION_NAME="PRODUCTS"\n'
+        '                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>',
+        '<INSTANCE NAME="PRODUCTS1" TRANSFORMATION_NAME="PRODUCTS"\n'
+        '                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>\n'
+        '        <INSTANCE NAME="SQ_PRODUCTS" TRANSFORMATION_NAME="SQ_PRODUCTS"\n'
+        '                   TRANSFORMATION_TYPE="Source Qualifier" TYPE="TRANSFORMATION"/>\n'
+        '        <INSTANCE NAME="TGT_PRODUCTS" TRANSFORMATION_NAME="TGT_PRODUCTS"\n'
+        '                   TRANSFORMATION_TYPE="Target Definition" TYPE="TARGET"/>',
+    )
+
+    mapping = parse_mapping(xml)
+
+    assert mapping.source_aliases == {"PRODUCTS": "PRODUCTS", "PRODUCTS1": "PRODUCTS"}
+
+
+def test_parse_mapping_skips_source_instance_missing_transformation_name() -> None:
+    xml = INSTANCE_ALIAS_MAPPING_XML.replace(
+        '<INSTANCE NAME="PRODUCTS1" TRANSFORMATION_NAME="PRODUCTS"\n'
+        '                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>',
+        '<INSTANCE NAME="PRODUCTS1" TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>',
+    )
+
+    mapping = parse_mapping(xml)
+
+    assert mapping.source_aliases == {"PRODUCTS": "PRODUCTS"}

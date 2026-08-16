@@ -46,17 +46,18 @@ New to PowerCenter or dbt? Quick guides to each system's own data model and term
 
 Working today: parsing, DAG ordering, and translators for **Source Qualifier**, **Filter**,
 **Expression**, **Aggregator**, **Lookup** (connected), **Joiner** (connected), **Union**, and
-**Router**, wired end-to-end through `convert_mapping()` — TDD throughout, see `git log`.
+**Router**, wired end-to-end through `convert_mapping()`, plus a **CLI** (`idbb convert`) that
+writes the generated model to a `.sql` file — TDD throughout, see `git log`.
 
 Not yet built: **Sorter**, **Rank**, and **Sequence Generator** translators — planned for a later
-stage of development. Also not yet built: `schema.yml` and migration-report generation, a CLI, and
-an executable dbt/DuckDB integration test.
+stage of development. Also not yet built: `schema.yml` and migration-report generation, and an
+executable dbt/DuckDB integration test.
 
 ## Getting started
 
 ```bash
 uv sync
-uv run pytest              # 196 tests
+uv run pytest              # 225 tests
 uv run coverage report -m  # 98% branch coverage
 ```
 
@@ -65,4 +66,14 @@ from informatica_dbt_bridge.converter import convert_mapping
 
 result = convert_mapping(xml_text, source_system="erp")
 print(result.sql)  # the generated dbt model
+```
+
+Or via the CLI, which writes the model straight to a `.sql` file (named after the mapping's
+`TARGET`) instead of printing it:
+
+```bash
+uv run idbb convert path/to/mapping.xml \
+    --out models/staging \
+    --source-system erp \
+    --mapping-name m_LOAD_ORDERS   # optional; defaults to the first MAPPING in the export
 ```

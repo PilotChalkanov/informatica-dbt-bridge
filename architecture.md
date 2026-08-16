@@ -132,7 +132,7 @@ would indicate a malformed export) for free, and needs no new dependency.
   notes, mapping variables, and every manual-review item collected from the
   translators and expression translator along the way.
 
-- **CLI** (`cli.py`) — `informatica-dbt-bridge convert <xml> --out <dbt_project_dir>`.
+- **CLI** (`cli.py`) — `idbb convert <xml> --out <dbt_project_dir>`.
   Thin: parses args, calls the library function below, writes the returned files to
   disk. All translation logic is filesystem-free and unit-testable without it.
 
@@ -173,14 +173,14 @@ produces byte-identical output.
 
 ### Interfaces
 
-- **CLI**: `informatica-dbt-bridge convert <xml-path> --out <dbt-project-root>`.
+- **CLI**: `idbb convert <xml-path> --out <dbt-project-root>`.
   Exit non-zero with a clear message on unparseable/unsupported input; never exit 0
   having silently dropped transformation logic.
 - **Library API**: `convert_mapping(...)` above — the contract the tests target.
 
 ### Deployment topology
 
-Local CLI tool, run via `uv run informatica-dbt-bridge convert ...`. No server, no
+Local CLI tool, run via `uv run idbb convert ...`. No server, no
 persistent process. A plausible future home is a one-off CI/pre-commit step for
 bulk-migrating an exported Informatica repo folder, but that's out of scope now —
 noted so the single-file-first design doesn't accidentally foreclose it (the
@@ -236,6 +236,19 @@ library function is already repo-batchable by calling it once per mapping file).
   Wiring it into real scheduling (dbt Cloud jobs, Airflow selectors,
   `config(tags=[...])`) is left to a human, consistent with the skill file's stance
   that orchestration isn't transformation logic.
+- **A mapping can genuinely load more than one `TARGET`** (confirmed directly against
+  the real demo export — all three of its mappings do this, e.g. one staging mapping
+  populating six separate staging tables). `SOURCE`/`TARGET` are folder-level
+  repository objects reusable across every mapping in the folder, so `convert_mapping`
+  resolves *this* mapping's actual target(s) via its own `CONNECTOR` edges (mirroring
+  how a Source Qualifier's `SOURCE` is resolved) rather than blindly taking the
+  folder's first `TARGET`. But this tool still renders one final `select` (and, via the
+  CLI, one `.sql` file) per mapping: when a mapping resolves to several targets, it
+  deterministically picks the alphabetically-first one to drive the final column list
+  and output filename, and flags the rest with a `TranslationNote` naming every target
+  found — a real gap, not silently papered over, but not yet fixed. Follow-up: emit one
+  model per target (would need `render_model`/`ConversionResult`/the CLI to support an
+  N-output mapping, not just 1:1).
 
 ## Implementation plan (next step)
 

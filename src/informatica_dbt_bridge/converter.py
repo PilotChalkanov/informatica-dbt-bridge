@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 
 from informatica_dbt_bridge.cte import Cte, TranslationNote
 from informatica_dbt_bridge.dag import topological_order
-from informatica_dbt_bridge.models import Connector, Mapping, SourceDef, TransformationNode
+from informatica_dbt_bridge.models import (
+    Connector,
+    Mapping,
+    SourceDef,
+    TargetDef,
+    TransformationNode,
+)
 from informatica_dbt_bridge.naming import snake_case
 from informatica_dbt_bridge.parser import parse_mapping
 from informatica_dbt_bridge.render import render_model
@@ -39,6 +45,8 @@ class ConversionResult:
 
     mapping_name: str
     sql: str
+    target_name: str  # the mapping's TARGET's raw name, e.g. "TGT_ORDERS" - not snake_cased;
+    # callers that need a filesystem-safe name (e.g. the CLI) apply naming.snake_case themselves
     notes: list[TranslationNote] = field(default_factory=list)
 
 
@@ -76,23 +84,25 @@ def convert_mapping(
         ValueError: The mapping has no SOURCE, no TARGET, a transformation
             with no upstream feeding it, a Joiner whose master/detail split
             couldn't be resolved, a Union whose INPUT groups couldn't be
-            cleanly matched one-to-one with upstream transformations, or a
+            cleanly matched one-to-one with upstream transformations, a
             transformation downstream of a Router whose specific branch
-            couldn't be resolved.
-        NotImplementedError: The mapping has more than one SOURCE (per-SQ
-            multi-source resolution is a known, separately-scoped follow-up
-            - see the project report), or a transformation has fan-in from
-            more than one upstream and isn't a Joiner with a resolvable
-            master/detail split or a Union with a resolvable group split.
+            couldn't be resolved, or a Source Qualifier whose SOURCE
+            couldn't be resolved (ambiguous or missing CONNECTOR wiring in a
+            multi-SOURCE mapping).
+        NotImplementedError: A transformation has fan-in from more than one
+            upstream and isn't a Joiner with a resolvable master/detail
+            split or a Union with a resolvable group split.
     """
     mapping = parse_mapping(xml_text, mapping_name=mapping_name)
+    if not mapping.sources:
+        raise ValueError(f"mapping {mapping.name!r} has no SOURCE")
     order = topological_order(mapping)
     upstream_of = _build_upstream_map(mapping)
     joiner_upstreams = _build_joiner_upstream_map(mapping)
     union_upstreams = _build_union_upstream_map(mapping)
     router_downstream_cte = _resolve_router_downstream_ctes(mapping)
     router_names = {t.name for t in mapping.transformations if t.type == "Router"}
-    source = _resolve_single_source(mapping)
+    source_qualifier_sources = _resolve_source_qualifier_sources(mapping)
 
     ctes: list[Cte] = []
     notes: list[TranslationNote] = []
@@ -104,7 +114,7 @@ def convert_mapping(
         translated = _translate_node(
             node,
             upstream_cte,
-            source,
+            source_qualifier_sources,
             source_system,
             joiner_upstreams.get(name),
             union_upstreams.get(name),
@@ -113,18 +123,22 @@ def convert_mapping(
         for cte in translated:
             notes.extend(cte.notes)
 
-    if not mapping.targets:
-        raise ValueError(f"mapping {mapping.name!r} has no TARGET")
-    final_columns = [snake_case(f.name) for f in mapping.targets[0].fields]
+    target, target_notes = _resolve_mapping_target(mapping)
+    final_columns = [snake_case(f.name) for f in target.fields]
 
     sql = render_model(ctes, final_columns=final_columns)
-    return ConversionResult(mapping_name=mapping.name, sql=sql, notes=notes)
+    return ConversionResult(
+        mapping_name=mapping.name,
+        sql=sql,
+        target_name=target.name,
+        notes=notes + target_notes,
+    )
 
 
 def _translate_node(
     node: TransformationNode,
     upstream_cte: str | None,
-    source: SourceDef,
+    source_qualifier_sources: dict[str, SourceDef],
     source_system: str,
     joiner_upstream: _JoinerUpstream | None,
     union_upstream: dict[str, str] | None,
@@ -144,8 +158,9 @@ def _translate_node(
             `node` has no single upstream (only valid for a Source
             Qualifier, or a Joiner/Union - which use
             `joiner_upstream`/`union_upstream` instead).
-        source: The mapping's resolved SOURCE, used when `node` is a Source
-            Qualifier.
+        source_qualifier_sources: Every Source Qualifier's resolved SOURCE
+            (see `_resolve_source_qualifier_sources`), used when `node` is a
+            Source Qualifier.
         source_system: The dbt `source()` name to pass through to a Source
             Qualifier translation.
         joiner_upstream: `node`'s resolved master/detail upstream
@@ -168,9 +183,17 @@ def _translate_node(
             attribute (there's no reliable way to resolve which table it
             joins against otherwise - see `translators/lookup.py`),
             `node.type` is `"Joiner"` with no resolvable `joiner_upstream`,
-            or `node` is a Union with no resolvable `union_upstream`.
+            `node` is a Union with no resolvable `union_upstream`, or `node`
+            is a Source Qualifier with no resolvable SOURCE.
     """
     if node.type == "Source Qualifier":
+        source = source_qualifier_sources.get(node.name)
+        if source is None:
+            raise ValueError(
+                f"{node.name!r} (Source Qualifier) has no resolvable SOURCE; needs a "
+                "CONNECTOR edge from exactly one SOURCE instance (or the mapping must "
+                "have exactly one SOURCE overall)"
+            )
         return [
             translate_source_qualifier(
                 node, source_system=source_system, source_table=source.name.lower()
@@ -641,26 +664,142 @@ def _resolve_router_downstream_ctes(mapping: Mapping) -> dict[str, str]:
     return result
 
 
-def _resolve_single_source(mapping: Mapping) -> SourceDef:
-    """Return the mapping's one SOURCE.
+def _resolve_source_qualifier_sources(mapping: Mapping) -> dict[str, SourceDef]:
+    """Resolve each Source Qualifier's own instance name to the specific SOURCE it reads.
+
+    A `CONNECTOR` edge already exists from each `SOURCE`'s own instance name
+    directly to the specific Source Qualifier instance it feeds (one edge
+    per field, all from the same SOURCE) - `parser.py` already parses every
+    `<CONNECTOR>` unconditionally, nothing filters SOURCE-origin edges out at
+    that layer. That instance name doesn't always match a `SourceDef.name`
+    directly, though: PowerCenter lets a mapping read one physical SOURCE
+    more than once (e.g. a self-join) under a second mapping-local instance
+    name (`RAW_PRODUCTS1`, aliasing `RAW_PRODUCTS`) - `mapping.source_aliases`
+    resolves an instance name to the real SourceDef.name it aliases, and a
+    non-aliased instance simply resolves to itself, so every
+    `Connector.from_instance` is resolved through it before matching against
+    `sources_by_name` - a strict generalization, not a special case. A
+    Source Qualifier's resolved SOURCE is only accepted if *all* of its
+    incoming SOURCE-origin edges agree on the same single SourceDef
+    (multiple fields from one source is normal; two different sources
+    feeding one SQ's ports directly is invalid PowerCenter shape - that's
+    what Joiner is for - and never guessed at here).
+
+    As a fallback for mappings with exactly one SOURCE and no such
+    CONNECTOR wiring at all (every synthetic/hand-built test fixture in this
+    project predates this resolution and has no SOURCE->SQ edges), a Source
+    Qualifier with zero SOURCE-origin candidates defaults to that one
+    SOURCE, since it's the only one it could possibly be - not a guess, an
+    unambiguous single candidate.
 
     Args:
-        mapping: The mapping to resolve a source for.
+        mapping: The mapping to resolve Source Qualifier sources for.
 
     Returns:
-        The mapping's single SourceDef.
+        A dict from Source Qualifier instance name to its resolved
+        SourceDef. A Source Qualifier with an ambiguous or unresolvable
+        SOURCE (and more than one SOURCE in the mapping) is simply absent
+        here - `_translate_node` raises a clear error for that case.
+    """
+    sources_by_name = {s.name: s for s in mapping.sources}
+    sq_names = {t.name for t in mapping.transformations if t.type == "Source Qualifier"}
+
+    candidates: dict[str, set[str]] = {}
+    for connector in mapping.connectors:
+        if connector.to_instance not in sq_names:
+            continue
+        resolved_name = mapping.source_aliases.get(connector.from_instance, connector.from_instance)
+        if resolved_name not in sources_by_name:
+            continue
+        candidates.setdefault(connector.to_instance, set()).add(resolved_name)
+
+    result: dict[str, SourceDef] = {}
+    for sq_name in sq_names:
+        names = candidates.get(sq_name, set())
+        if len(names) == 1:
+            result[sq_name] = sources_by_name[next(iter(names))]
+        elif not names and len(mapping.sources) == 1:
+            result[sq_name] = mapping.sources[0]
+    return result
+
+
+def _resolve_mapping_target(mapping: Mapping) -> tuple[TargetDef, list[TranslationNote]]:
+    """Resolve which of the folder's (possibly many) TARGETs this specific mapping loads.
+
+    SOURCE/TARGET are folder-level repository objects, reusable across every
+    mapping in the folder - `mapping.targets` is the whole folder's TARGET
+    list, not scoped to this one mapping. The mapping's own CONNECTOR edges
+    (which *are* mapping-scoped) are the source of truth for which TARGET(s)
+    it actually terminates at - the same category of problem
+    `_resolve_source_qualifier_sources` solves for SOURCE, applied to the
+    other end of the pipeline.
+
+    Unlike a Source Qualifier reading two different SOURCEs directly (a
+    genuine PowerCenter authoring error - that's what Joiner is for), a
+    single mapping loading *several* different TARGETs is a normal,
+    common PowerCenter pattern (e.g. one staging mapping populating many
+    staging tables) - confirmed directly against the real demo export,
+    where every one of its three mappings does this. This tool currently
+    renders one final `select` (and so, in the CLI, one `.sql` file) per
+    mapping, so it can't fully represent that yet: rather than guess which
+    target's shape is "the" output (or hard-fail every legitimate
+    multi-target mapping, which would make the real demo file
+    unconvertible), this deterministically picks the alphabetically-first
+    matched TARGET to drive the final column list/output filename, and
+    flags the rest via a `TranslationNote` naming every target found - full
+    N-target output is a genuine, separate follow-up, not attempted here.
+
+    As a fallback for a folder with exactly one TARGET and no CONNECTOR
+    wiring onto it at all (every synthetic/hand-built test fixture in this
+    project predates this resolution and never wires a TARGET via
+    CONNECTOR), a mapping with zero TARGET-origin candidates defaults to
+    that one TARGET, since it's the only one it could possibly be.
+
+    Args:
+        mapping: The mapping to resolve a TARGET for.
+
+    Returns:
+        The mapping's resolved TargetDef, and a TranslationNote (as a
+        one-element list) if more than one TARGET was found - otherwise an
+        empty list.
 
     Raises:
-        ValueError: The mapping has no SOURCE.
-        NotImplementedError: The mapping has more than one SOURCE - that
-            needs Joiner support, which doesn't exist yet.
+        ValueError: The mapping's folder has no TARGET at all, or (with more
+            than one TARGET in the folder) none of this mapping's own
+            CONNECTOR edges land on any of them - no signal to resolve from
+            at all, never guessed.
     """
-    if not mapping.sources:
-        raise ValueError(f"mapping {mapping.name!r} has no SOURCE")
-    if len(mapping.sources) > 1:
-        raise NotImplementedError(
-            f"mapping {mapping.name!r} has multiple sources "
-            f"{[s.name for s in mapping.sources]}; multi-source mappings (Joiner) "
-            "aren't supported yet"
+    if not mapping.targets:
+        raise ValueError(f"mapping {mapping.name!r} has no TARGET")
+    targets_by_name = {t.name: t for t in mapping.targets}
+
+    matched = sorted(
+        {
+            connector.to_instance
+            for connector in mapping.connectors
+            if connector.to_instance in targets_by_name
+        }
+    )
+    if matched:
+        chosen = targets_by_name[matched[0]]
+        if len(matched) == 1:
+            return chosen, []
+        note = TranslationNote(
+            transformation=mapping.name,
+            message=(
+                f"mapping loads {len(matched)} TARGETs ({', '.join(matched)}), but this "
+                f"tool currently emits a single dbt model per mapping - only "
+                f"{chosen.name!r}'s shape was used for the final SELECT and output file "
+                "name; the other targets' upstream logic still exists in the generated "
+                "CTEs but isn't reflected in the final column list. Needs manual review "
+                "(likely splitting into one model per target)."
+            ),
         )
-    return mapping.sources[0]
+        return chosen, [note]
+    if len(mapping.targets) == 1:
+        return mapping.targets[0], []
+    raise ValueError(
+        f"mapping {mapping.name!r} has {len(mapping.targets)} TARGET(s) in its folder "
+        "and none of its own CONNECTOR edges land on any of them; cannot determine "
+        "which TARGET it loads"
+    )

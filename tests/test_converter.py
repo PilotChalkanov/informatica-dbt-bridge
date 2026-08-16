@@ -100,6 +100,94 @@ def test_convert_mapping_produces_expected_sql_for_sq_filter_expression_chain() 
     assert result.mapping_name == "m_LOAD_ORDERS"
     assert result.sql == EXPECTED_SQL
     assert result.notes == []
+    assert result.target_name == "TGT_ORDERS"
+
+
+def test_convert_mapping_resolves_target_via_connector_in_multi_target_folder() -> None:
+    # SOURCE/TARGET are folder-level repository objects, reusable across
+    # every mapping in the folder - `mapping.targets` is the *whole folder's*
+    # TARGET list, not scoped to this one mapping. A second, unrelated
+    # TARGET is declared *before* TGT_ORDERS in file order specifically so a
+    # naive "just take targets[0]" implementation would get this wrong -
+    # only this mapping's own CONNECTOR edges (mapping-scoped) can say which
+    # TARGET it actually loads.
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+        '<TARGET NAME="TGT_OTHER_MAPPING" DATABASETYPE="Oracle">\n'
+        '        <TARGETFIELD NAME="SOMETHING" DATATYPE="varchar"/>\n'
+        "      </TARGET>\n\n"
+        '      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+    ).replace(
+        "</MAPPING>",
+        '<CONNECTOR FROMINSTANCE="EXP_CALC" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="TGT_ORDERS" TOFIELD="ORDER_ID"/>\n'
+        "      </MAPPING>",
+    )
+
+    result = convert_mapping(xml, source_system="erp")
+
+    assert result.target_name == "TGT_ORDERS"
+
+
+def test_convert_mapping_flags_note_and_picks_deterministic_target_when_multi_target() -> None:
+    # This mapping's own CONNECTOR edges terminate at *two different*
+    # TARGETs - a normal PowerCenter pattern (one mapping loading several
+    # tables), confirmed directly against the real demo export, where every
+    # one of its three mappings does this. Never guessed at silently: picks
+    # the alphabetically-first match deterministically and flags the rest.
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+        '<TARGET NAME="TGT_OTHER" DATABASETYPE="Oracle">\n'
+        '        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>\n'
+        "      </TARGET>\n\n"
+        '      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+    ).replace(
+        "</MAPPING>",
+        '<CONNECTOR FROMINSTANCE="EXP_CALC" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="TGT_ORDERS" TOFIELD="ORDER_ID"/>\n'
+        '        <CONNECTOR FROMINSTANCE="EXP_CALC" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="TGT_OTHER" TOFIELD="ORDER_ID"/>\n'
+        "      </MAPPING>",
+    )
+
+    result = convert_mapping(xml, source_system="erp")
+
+    # "TGT_ORDERS" < "TGT_OTHER" alphabetically, so it's the deterministic pick.
+    assert result.target_name == "TGT_ORDERS"
+    assert len(result.notes) == 1
+    assert result.notes[0].transformation == "m_LOAD_ORDERS"
+    assert "TGT_ORDERS" in result.notes[0].message
+    assert "TGT_OTHER" in result.notes[0].message
+    assert "2 TARGETs" in result.notes[0].message
+
+
+def test_convert_mapping_raises_when_target_wholly_unresolvable() -> None:
+    # Multiple TARGETs in the folder, but *none* of this mapping's own
+    # CONNECTOR edges land on any of them - no signal at all to pick from.
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+        '<TARGET NAME="TGT_OTHER" DATABASETYPE="Oracle">\n'
+        '        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>\n'
+        "      </TARGET>\n\n"
+        '      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">',
+    )
+
+    with pytest.raises(ValueError, match="m_LOAD_ORDERS"):
+        convert_mapping(xml, source_system="erp")
+
+
+def test_convert_mapping_raises_when_mapping_has_no_target_at_all() -> None:
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">\n'
+        '        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>\n'
+        '        <TARGETFIELD NAME="STATUS" DATATYPE="varchar"/>\n'
+        '        <TARGETFIELD NAME="IS_LARGE" DATATYPE="varchar"/>\n'
+        "      </TARGET>",
+        "",
+    )
+
+    with pytest.raises(ValueError, match="no TARGET"):
+        convert_mapping(xml, source_system="erp")
 
 
 def test_convert_mapping_flags_unsupported_transformation_type_with_todo() -> None:
@@ -128,14 +216,219 @@ def test_convert_mapping_raises_on_transformation_with_no_upstream() -> None:
         convert_mapping(xml, source_system="erp")
 
 
-def test_convert_mapping_raises_on_multiple_sources() -> None:
+def test_convert_mapping_raises_when_sq_unresolvable_among_multiple_sources() -> None:
+    # A second SOURCE now exists, but nothing connects it (or anything) to
+    # SQ_ORDERS via a SOURCE->SourceQualifier CONNECTOR edge, and the mapping
+    # has more than one SOURCE - so the "only one SOURCE exists, so it must
+    # be this one" fallback doesn't apply either. Genuinely unresolvable,
+    # unlike a mapping with 2+ SOURCEs that are each properly wired (see
+    # `test_convert_mapping_resolves_each_source_qualifier_to_its_own_source`
+    # below) - multiple SOURCEs are supported now, this is a distinct,
+    # still-real ambiguity case.
     xml = GOLDEN_MAPPING_XML.replace(
         "</SOURCE>",
         '</SOURCE><SOURCE NAME="CUSTOMERS" DATABASETYPE="Oracle"></SOURCE>',
         1,
     )
 
-    with pytest.raises(NotImplementedError, match="multiple sources"):
+    with pytest.raises(ValueError, match="SQ_ORDERS"):
+        convert_mapping(xml, source_system="erp")
+
+
+def test_convert_mapping_raises_when_mapping_has_no_source_at_all() -> None:
+    xml = GOLDEN_MAPPING_XML.replace(
+        '<SOURCE NAME="ORDERS" DATABASETYPE="Oracle">\n'
+        '        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"\n'
+        '                      KEYTYPE="PRIMARY KEY" NULLABLE="NOTNULL"/>\n'
+        '        <SOURCEFIELD NAME="STATUS" DATATYPE="string" PRECISION="20" NULLABLE="NULL"/>\n'
+        '        <SOURCEFIELD NAME="AMOUNT" DATATYPE="decimal" PRECISION="15" SCALE="2"/>\n'
+        "      </SOURCE>",
+        "",
+    )
+
+    with pytest.raises(ValueError, match="no SOURCE"):
+        convert_mapping(xml, source_system="erp")
+
+
+TWO_SOURCE_MAPPING_XML = """
+<POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
+  <REPOSITORY NAME="REPO" VERSION="1">
+    <FOLDER NAME="MyFolder">
+
+      <SOURCE NAME="ORDERS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <SOURCE NAME="CUSTOMERS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ORDER_ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <TARGET NAME="TGT_ORDERS" DATABASETYPE="Oracle">
+        <TARGETFIELD NAME="ORDER_ID" DATATYPE="decimal"/>
+      </TARGET>
+
+      <MAPPING NAME="m_LOAD_ORDERS_TWO_SOURCES">
+        <TRANSFORMATION NAME="SQ_ORDERS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="ORDER_ID" PORTTYPE="OUTPUT" DATATYPE="decimal"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="SQ_CUSTOMERS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="ORDER_ID" PORTTYPE="OUTPUT" DATATYPE="decimal"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="JNR_ORDERS" TYPE="Joiner">
+          <TRANSFORMFIELD NAME="ORDER_ID" PORTTYPE="INPUT/OUTPUT" DATATYPE="decimal"/>
+          <TRANSFORMFIELD NAME="ORDER_ID1" PORTTYPE="INPUT/OUTPUT/MASTER" DATATYPE="decimal"/>
+          <TABLEATTRIBUTE NAME="Join Condition" VALUE="ORDER_ID1 = ORDER_ID"/>
+          <TABLEATTRIBUTE NAME="Join Type" VALUE="Normal Join"/>
+        </TRANSFORMATION>
+
+        <CONNECTOR FROMINSTANCE="ORDERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="SQ_ORDERS" TOFIELD="ORDER_ID"/>
+        <CONNECTOR FROMINSTANCE="CUSTOMERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="SQ_CUSTOMERS" TOFIELD="ORDER_ID"/>
+        <CONNECTOR FROMINSTANCE="SQ_ORDERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="JNR_ORDERS" TOFIELD="ORDER_ID1"/>
+        <CONNECTOR FROMINSTANCE="SQ_CUSTOMERS" FROMFIELD="ORDER_ID"
+                    TOINSTANCE="JNR_ORDERS" TOFIELD="ORDER_ID"/>
+      </MAPPING>
+
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>
+"""
+
+
+def test_convert_mapping_resolves_each_source_qualifier_to_its_own_source() -> None:
+    result = convert_mapping(TWO_SOURCE_MAPPING_XML, source_system="erp")
+
+    assert result.mapping_name == "m_LOAD_ORDERS_TWO_SOURCES"
+    assert "sq_orders as (\n\n    select order_id\n    from {{ source('erp', 'orders') }}" in (
+        result.sql
+    )
+    assert (
+        "sq_customers as (\n\n    select order_id\n    from {{ source('erp', 'customers') }}"
+        in result.sql
+    )
+    assert result.notes == []
+
+
+def test_convert_mapping_raises_when_source_qualifier_source_unresolvable() -> None:
+    # SQ_ORDERS now has no CONNECTOR from any SOURCE at all, and the mapping
+    # has two SOURCEs - genuinely unresolvable, not a case where "only one
+    # SOURCE exists" can save it.
+    xml = TWO_SOURCE_MAPPING_XML.replace(
+        '<CONNECTOR FROMINSTANCE="ORDERS" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="SQ_ORDERS" TOFIELD="ORDER_ID"/>',
+        "",
+    )
+
+    with pytest.raises(ValueError, match="SQ_ORDERS"):
+        convert_mapping(xml, source_system="erp")
+
+
+def test_convert_mapping_raises_when_source_qualifier_fed_by_two_different_sources() -> None:
+    # SQ_ORDERS now has CONNECTOR edges from *both* SOURCEs directly - an
+    # invalid shape (that's what Joiner is for), must not silently pick one.
+    xml = TWO_SOURCE_MAPPING_XML.replace(
+        '<CONNECTOR FROMINSTANCE="CUSTOMERS" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="SQ_CUSTOMERS" TOFIELD="ORDER_ID"/>',
+        '<CONNECTOR FROMINSTANCE="CUSTOMERS" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="SQ_CUSTOMERS" TOFIELD="ORDER_ID"/>\n'
+        '        <CONNECTOR FROMINSTANCE="CUSTOMERS" FROMFIELD="ORDER_ID"\n'
+        '                    TOINSTANCE="SQ_ORDERS" TOFIELD="ORDER_ID"/>',
+    )
+
+    with pytest.raises(ValueError, match="SQ_ORDERS"):
+        convert_mapping(xml, source_system="erp")
+
+
+# Mirrors the real demo export's RAW_PRODUCTS/RAW_PRODUCTS1 shape: SQ_PRODUCTS
+# reads the SOURCE directly, SQ_PRODUCTS1 reads it through a mapping-local
+# INSTANCE alias (a self-join pattern) - both must resolve to the same
+# underlying SOURCE. A second, unrelated SOURCE is included specifically so
+# the "only one SOURCE exists" fallback can't accidentally paper over broken
+# alias resolution - both SQs must resolve via real CONNECTOR/INSTANCE data.
+ALIASED_SOURCE_MAPPING_XML = """
+<POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
+  <REPOSITORY NAME="REPO" VERSION="1">
+    <FOLDER NAME="MyFolder">
+
+      <SOURCE NAME="PRODUCTS" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="SKU" DATATYPE="string" PRECISION="50" SCALE="0"/>
+      </SOURCE>
+
+      <SOURCE NAME="UNRELATED" DATABASETYPE="Oracle">
+        <SOURCEFIELD NAME="ID" DATATYPE="decimal" PRECISION="10" SCALE="0"/>
+      </SOURCE>
+
+      <TARGET NAME="TGT_PRODUCTS" DATABASETYPE="Oracle">
+        <TARGETFIELD NAME="SKU" DATATYPE="varchar"/>
+      </TARGET>
+
+      <MAPPING NAME="m_LOAD_PRODUCTS_SELF_JOIN">
+        <TRANSFORMATION NAME="SQ_PRODUCTS" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="SKU" PORTTYPE="OUTPUT" DATATYPE="string"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="SQ_PRODUCTS1" TYPE="Source Qualifier">
+          <TRANSFORMFIELD NAME="SKU" PORTTYPE="OUTPUT" DATATYPE="string"/>
+        </TRANSFORMATION>
+
+        <TRANSFORMATION NAME="JNR_PRODUCTS" TYPE="Joiner">
+          <TRANSFORMFIELD NAME="SKU" PORTTYPE="INPUT/OUTPUT" DATATYPE="string"/>
+          <TRANSFORMFIELD NAME="SKU1" PORTTYPE="INPUT/OUTPUT/MASTER" DATATYPE="string"/>
+          <TABLEATTRIBUTE NAME="Join Condition" VALUE="SKU1 = SKU"/>
+          <TABLEATTRIBUTE NAME="Join Type" VALUE="Normal Join"/>
+        </TRANSFORMATION>
+
+        <INSTANCE NAME="PRODUCTS" TRANSFORMATION_NAME="PRODUCTS"
+                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>
+        <INSTANCE NAME="PRODUCTS1" TRANSFORMATION_NAME="PRODUCTS"
+                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>
+
+        <CONNECTOR FROMINSTANCE="PRODUCTS" FROMFIELD="SKU"
+                    TOINSTANCE="SQ_PRODUCTS" TOFIELD="SKU"/>
+        <CONNECTOR FROMINSTANCE="PRODUCTS1" FROMFIELD="SKU"
+                    TOINSTANCE="SQ_PRODUCTS1" TOFIELD="SKU"/>
+        <CONNECTOR FROMINSTANCE="SQ_PRODUCTS1" FROMFIELD="SKU"
+                    TOINSTANCE="JNR_PRODUCTS" TOFIELD="SKU1"/>
+        <CONNECTOR FROMINSTANCE="SQ_PRODUCTS" FROMFIELD="SKU"
+                    TOINSTANCE="JNR_PRODUCTS" TOFIELD="SKU"/>
+      </MAPPING>
+
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>
+"""
+
+
+def test_convert_mapping_resolves_source_qualifier_through_instance_alias() -> None:
+    result = convert_mapping(ALIASED_SOURCE_MAPPING_XML, source_system="erp")
+
+    assert result.mapping_name == "m_LOAD_PRODUCTS_SELF_JOIN"
+    assert (
+        "sq_products as (\n\n    select sku\n    from {{ source('erp', 'products') }}" in result.sql
+    )
+    assert (
+        "sq_products1 as (\n\n    select sku\n    from {{ source('erp', 'products') }}"
+        in result.sql
+    )
+    assert result.notes == []
+
+
+def test_convert_mapping_raises_when_aliased_source_qualifier_unresolvable() -> None:
+    # PRODUCTS1's own INSTANCE alias is missing entirely, and "PRODUCTS1"
+    # doesn't match any real SourceDef.name directly either. The fixture
+    # already has 2 SOURCEs, so the "only one SOURCE, so it must be this
+    # one" fallback can't rescue it.
+    xml = ALIASED_SOURCE_MAPPING_XML.replace(
+        '<INSTANCE NAME="PRODUCTS1" TRANSFORMATION_NAME="PRODUCTS"\n'
+        '                   TRANSFORMATION_TYPE="Source Definition" TYPE="SOURCE"/>',
+        "",
+    )
+
+    with pytest.raises(ValueError, match="SQ_PRODUCTS1"):
         convert_mapping(xml, source_system="erp")
 
 
@@ -218,10 +511,10 @@ def test_convert_mapping_raises_on_lookup_with_no_upstream() -> None:
 
 
 # Both Source Qualifiers read the same single SOURCE (a valid, if unusual,
-# "join a source against itself" pattern) - deliberately, so this fixture
-# doesn't trip `_resolve_single_source`'s still-in-place multi-SOURCE
-# restriction (see the project report on why that fix was deferred this
-# round) while still exercising a real two-upstream Joiner end to end.
+# "join a source against itself" pattern) - kept from when multi-SOURCE
+# mappings weren't supported yet; still a perfectly valid fixture shape for
+# testing Joiner specifically, so left as-is rather than churned for its own
+# sake (see TWO_SOURCE_MAPPING_XML below for a real multi-SOURCE fixture).
 JOINER_MAPPING_XML = """
 <POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
   <REPOSITORY NAME="REPO" VERSION="1">
@@ -325,10 +618,9 @@ def test_convert_mapping_joiner_resolution_ignores_unrelated_connectors() -> Non
 
 
 # All three Source Qualifiers read the same single SOURCE (same "join/union a
-# source against itself" pattern used for JOINER_MAPPING_XML, for the same
-# reason - avoids tripping `_resolve_single_source`'s still-in-place
-# multi-SOURCE restriction while still exercising a real N-ary-fan-in Union
-# end to end).
+# source against itself" pattern used for JOINER_MAPPING_XML, kept for the
+# same reason - still valid, not churned just because multi-SOURCE mappings
+# are supported now too).
 UNION_MAPPING_XML = """
 <POWERMART CREATION_DATE="01/01/2024" REPOSITORY_VERSION="1">
   <REPOSITORY NAME="REPO" VERSION="1">
